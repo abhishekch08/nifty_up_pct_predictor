@@ -2,7 +2,12 @@
 export const API_URL = import.meta.env.VITE_API_URL || ''
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, init)
+  let response: Response
+  try {
+    response = await fetch(`${API_URL}${path}`, init)
+  } catch {
+    throw new Error('Cannot reach the local API. Keep run.bat open, then refresh this page.')
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(body.detail || 'Request failed')

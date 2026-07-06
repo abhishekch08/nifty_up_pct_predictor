@@ -8,7 +8,8 @@ This is intentionally a probability terminal—not a deterministic “buy/sell�
 
 - Responsive React/TypeScript terminal with overview, institutional flows, derivatives, options range calculator, backtest, calibration, model registry, and admin pages.
 - FastAPI API with SQLAlchemy persistence for daily markets, FII/DII cash flows, participant OI, options EOD, model versions, predictions, backtests, quality logs, and event flags.
-- Internet ingestion through Yahoo's chart endpoint for Nifty, India VIX, major global indices, USD/INR, DXY, Brent, and the US 10-year yield.
+- Twelve-year history through Yahoo's chart endpoint, overlaid with the official NSE closing snapshot for current Nifty and India VIX data.
+- Automatic official NSE ingestion for current FII/DII cash activity, participant-wise F&O open interest, and the Nifty options EOD derivatives bhavcopy.
 - Three-attempt exponential retry, disk cache, stale-cache fallback, per-source provenance, and visible degradation instead of silent zero filling.
 - Manual CSV fallback with aliases, validation, preview response, upsert semantics, and `manual_upload` provenance.
 - Price, volatility, VIX, flow, trend, momentum, range, breakout, and calendar feature engineering.
@@ -47,13 +48,13 @@ Only Python 3.11 or newer is required. Download it from [python.org](https://www
    .\run.bat
    ```
 
-3. The first launch creates an isolated Python environment and installs the required packages. Later launches start immediately.
-4. The dashboard opens automatically at `http://127.0.0.1:8000`.
-5. Open **Admin**, enter `change-me`, then run **Fetch market data**, **Train candidate**, and **Deploy latest eligible**.
+3. The first launch creates an isolated Python environment and installs the required packages.
+4. Before opening the dashboard, the launcher fetches and prints every source status, validates the official trading date, trains when needed, applies deployment gates, and generates a fresh prediction.
+5. The dashboard opens automatically at `http://127.0.0.1:8000` only after that bootstrap succeeds.
 
-Keep the launcher window open while using the app. Press `Ctrl+C` to stop it. The database, downloaded data, and trained models remain on your computer for the next launch. The first 12-year refresh and training run can take several minutes.
+Keep the launcher window open while using the app. Press `Ctrl+C` to stop it. The database, downloaded data, and trained models remain on your computer for the next launch. The first 12-year refresh and training run can take several minutes; later launches reuse the current model and only generate a fresh prediction unless new trainable data arrived.
 
-To choose a private admin key, edit `backend/.env` after the first run and replace `ADMIN_API_KEY=change-me`.
+The local Admin key is prefilled as `change-me`. To choose a private key, edit `backend/.env` after the first run and replace `ADMIN_API_KEY=change-me`.
 
 ## Optional Docker setup
 

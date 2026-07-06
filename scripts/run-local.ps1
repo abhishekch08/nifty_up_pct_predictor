@@ -53,6 +53,20 @@ try {
 } catch { }
 
 Write-Host ""
+Write-Host "Refreshing verified data and checking the deployed model..." -ForegroundColor Cyan
+Push-Location $Backend
+try {
+    & $VenvPython -m app.bootstrap
+    $BootstrapExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($BootstrapExit -ne 0) {
+    Write-Host "Data/model bootstrap failed. The dashboard was not started with stale data." -ForegroundColor Red
+    exit $BootstrapExit
+}
+
+Write-Host ""
 Write-Host "Opening http://127.0.0.1:8000" -ForegroundColor Cyan
 Write-Host "Admin key on a fresh install: change-me" -ForegroundColor Yellow
 Write-Host "Keep this window open. Press Ctrl+C to stop the app." -ForegroundColor DarkGray

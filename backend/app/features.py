@@ -165,6 +165,9 @@ def add_participant_features(features: pd.DataFrame, positioning: pd.DataFrame |
 def add_options_features(features: pd.DataFrame, options: pd.DataFrame | None) -> pd.DataFrame:
     if options is None or options.empty:
         return features
+    options = options.copy()
+    for column in ("strike", "spot", "ce_oi", "ce_iv", "ce_ltp", "pe_oi", "pe_iv", "pe_ltp"):
+        options[column] = pd.to_numeric(options[column], errors="coerce")
     rows = []
     for day, all_expiries in options.groupby("date"):
         valid_expiries = [expiry for expiry in all_expiries.expiry if expiry >= day]

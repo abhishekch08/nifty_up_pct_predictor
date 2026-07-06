@@ -143,11 +143,13 @@ function Derivatives() {
 
 function Options({prediction:p}:{prediction:Prediction}) {
   const [spot,setSpot]=useState(p.nifty_close||25000); const [vix,setVix]=useState(p.india_vix||14); const [days,setDays]=useState(1)
+  const [chain,setChain]=useState<any>(null)
+  useEffect(()=>{api<any>('/api/options/latest').then(setChain).catch(()=>{})},[])
   const d365=vix/100/Math.sqrt(365)*Math.sqrt(days), d252=vix/100/Math.sqrt(252)*Math.sqrt(days)
   return <section className="two-col"><div className="panel"><PanelTitle label="Expected range calculator" note="VIX annualized conventions"/>
     <div className="form-grid"><label>Nifty CMP<input type="number" value={spot} onChange={e=>setSpot(+e.target.value)}/></label><label>India VIX<input type="number" value={vix} onChange={e=>setVix(+e.target.value)}/></label><label>Days to expiry<input type="number" min="1" max="60" value={days} onChange={e=>setDays(+e.target.value)}/></label></div>
     <div className="calc-results"><div><span>365-DAY LOWER</span><b>{num(spot*(1-d365))}</b></div><div><span>365-DAY UPPER</span><b>{num(spot*(1+d365))}</b></div><div><span>252-DAY LOWER</span><b>{num(spot*(1-d252))}</b></div><div><span>252-DAY UPPER</span><b>{num(spot*(1+d252))}</b></div></div>
-  </div><div className="panel"><PanelTitle label="Options-chain analytics" note="EOD, nearest valid expiry"/><Empty text="PCR, walls, max pain and IV skew appear when options EOD data is loaded. Live NSE scraping is not silently substituted for auditable EOD data."/></div></section>
+  </div><div className="panel"><PanelTitle label="Options-chain analytics" note="Official NSE EOD bhavcopy"/>{chain && chain.status !== 'unavailable' ? <div className="calc-results"><div><span>PCR BY OI</span><b>{chain.pcr_oi?.toFixed(2) ?? '—'}</b></div><div><span>SPOT</span><b>{num(chain.spot)}</b></div><div><span>CALL WALL</span><b>{num(chain.call_wall)}</b></div><div><span>PUT WALL</span><b>{num(chain.put_wall)}</b></div><div><span>TOTAL CALL OI</span><b>{num(chain.total_call_oi)}</b></div><div><span>TOTAL PUT OI</span><b>{num(chain.total_put_oi)}</b></div></div> : <Empty text="Official NSE options EOD data has not been published yet. Restart later or use the CSV fallback."/>}</div></section>
 }
 
 function BacktestPage({data}:{data:Backtest|null}) {
@@ -170,7 +172,7 @@ function Models({rows}:{rows:any[]}) {
 }
 
 function Admin({onDone,models}:{onDone:()=>void;models:any[]}) {
-  const [key,setKey]=useState(''); const [busy,setBusy]=useState(''); const [message,setMessage]=useState(''); const [dataset,setDataset]=useState('nifty')
+  const [key,setKey]=useState(() => ['127.0.0.1','localhost'].includes(window.location.hostname) ? 'change-me' : ''); const [busy,setBusy]=useState(''); const [message,setMessage]=useState(''); const [dataset,setDataset]=useState('nifty')
   const action=async(name:string,path:string,body?:unknown)=>{setBusy(name);setMessage('');try{const result=await api<any>(path,{method:'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});setMessage(`${name} completed: ${result.model_version||result.rows_processed||result.status||'OK'}`);onDone()}catch(e){setMessage((e as Error).message)}finally{setBusy('')}}
   const upload=async(file:File)=>{setBusy('Upload');const form=new FormData();form.append('file',file);try{const result=await api<any>(`/api/admin/upload-csv?dataset=${dataset}`,{method:'POST',headers:{'X-Admin-Key':key},body:form});setMessage(`Imported ${result.rows} ${dataset} rows`);onDone()}catch(e){setMessage((e as Error).message)}finally{setBusy('')}}
   return <><section className="panel admin-head"><div><PanelTitle label="Pipeline control" note="Privileged actions require the server-side API key"/></div><label>ADMIN API KEY<input type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder="Enter key"/></label></section>

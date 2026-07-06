@@ -2,7 +2,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from app.features import build_feature_frame, price_features
+from app.features import add_options_features, build_feature_frame, price_features
 
 
 def sample_prices(n=260):
@@ -35,3 +35,15 @@ def test_calendar_and_vix_features_merge_asof_by_date():
     assert result.vix_close.eq(14).all()
     assert set(result.weekly_expiry_flag.unique()) <= {0, 1}
 
+
+def test_official_bhavcopy_options_work_without_implied_volatility():
+    day = date(2026, 7, 6)
+    features = pd.DataFrame({"date": [day]})
+    options = pd.DataFrame([
+        {"date": day, "expiry": date(2026, 7, 7), "strike": 24400, "spot": 24430.35,
+         "ce_oi": 1000, "ce_iv": None, "ce_ltp": 120, "pe_oi": 1500, "pe_iv": None, "pe_ltp": 90},
+    ])
+    result = add_options_features(features, options)
+    assert result.pcr_oi.iloc[0] == 1.5
+    assert np.isnan(result.iv_skew.iloc[0])
+    assert result.straddle_price_atm.iloc[0] == 210

@@ -23,7 +23,12 @@ NON_FEATURES = {"date", "symbol", "source", "available_at", "open", "high", "low
 
 
 def feature_columns(frame: pd.DataFrame) -> list[str]:
-    return [c for c in frame.columns if c not in TARGETS | NON_FEATURES and pd.api.types.is_numeric_dtype(frame[c])]
+    # A feature must have enough historical observations to be estimable. This
+    # keeps a newly available one-day official feed visible in the dashboard
+    # without pretending it had existed throughout the walk-forward backtest.
+    minimum_history = max(20, int(len(frame) * 0.05))
+    return [c for c in frame.columns if c not in TARGETS | NON_FEATURES
+            and pd.api.types.is_numeric_dtype(frame[c]) and frame[c].notna().sum() >= minimum_history]
 
 
 def classifier() -> Pipeline:

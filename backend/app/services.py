@@ -12,7 +12,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .data_sources import SYMBOLS, YahooChartSource, validate_frame
+from .data_sources import NSEOfficialSource, SYMBOLS, YahooChartSource, validate_frame
 from .features import build_feature_frame, classify_regime
 from .ml import explain_linear, load_model, signal_label, train_final, walk_forward
 from .models import (BacktestResult, DataQualityLog, FlowDaily, MarketBreadth,
@@ -60,6 +60,46 @@ def upsert_market(db: Session, frame: pd.DataFrame) -> int:
     return len(rows)
 
 
+def upsert_flows(db: Session, frame: pd.DataFrame) -> int:
+    for row in frame.to_dict("records"):
+        entity = db.get(FlowDaily, row["date"]) or FlowDaily(date=row["date"], available_at=row["available_at"])
+        for col in ("fii_buy", "fii_sell", "fii_net", "dii_buy", "dii_sell", "dii_net"):
+            setattr(entity, col, _optional(row[col]))
+        entity.source = row.get("source", "unknown")
+        entity.available_at = row["available_at"]
+        db.add(entity)
+    db.commit()
+    return len(frame)
+
+
+def upsert_participant_oi(db: Session, frame: pd.DataFrame) -> int:
+    for row in frame.to_dict("records"):
+        entity = db.scalar(select(ParticipantOI).where(
+            ParticipantOI.date == row["date"], ParticipantOI.participant == str(row["participant"])))
+        entity = entity or ParticipantOI(date=row["date"], participant=str(row["participant"]), available_at=row["available_at"])
+        for col in ("index_futures_long", "index_futures_short", "index_call_long", "index_call_short", "index_put_long", "index_put_short"):
+            setattr(entity, col, _optional(row[col]))
+        entity.source = row.get("source", "unknown")
+        entity.available_at = row["available_at"]
+        db.add(entity)
+    db.commit()
+    return len(frame)
+
+
+def upsert_options(db: Session, frame: pd.DataFrame) -> int:
+    for row in frame.to_dict("records"):
+        entity = db.scalar(select(OptionEOD).where(
+            OptionEOD.date == row["date"], OptionEOD.expiry == row["expiry"], OptionEOD.strike == float(row["strike"])))
+        entity = entity or OptionEOD(date=row["date"], expiry=row["expiry"], strike=float(row["strike"]), spot=float(row["spot"]))
+        entity.spot = float(row["spot"])
+        for col in ("ce_oi", "ce_change_oi", "ce_volume", "ce_iv", "ce_ltp", "pe_oi", "pe_change_oi", "pe_volume", "pe_iv", "pe_ltp"):
+            setattr(entity, col, _optional(row.get(col)))
+        entity.source = row.get("source", "unknown")
+        db.add(entity)
+    db.commit()
+    return len(frame)
+
+
 def fetch_market_data(db: Session, years: int = 12) -> dict:
     source = YahooChartSource()
     end, start = date.today(), date.today() - timedelta(days=365 * years)
@@ -75,14 +115,45 @@ def fetch_market_data(db: Session, years: int = 12) -> dict:
             db.rollback()
             statuses.append({"dataset": label, "symbol": label, "status": "degraded", "rows": 0,
                              "missing_fields": [], "warnings": [str(exc)], "source": "yahoo_chart"})
+    official = NSEOfficialSource()
+    official_date = None
+    try:
+        snapshot, official_date = official.index_snapshot()
+        count = upsert_market(db, snapshot)
+        fetched += count
+        statuses.append({"dataset": "NSE_OFFICIAL_EOD", "symbol": "NIFTY/VIX", "status": "complete", "rows": count,
+                         "missing_fields": [], "warnings": [], "source": "nse_official"})
+    except Exception as exc:
+        db.rollback()
+        statuses.append({"dataset": "NSE_OFFICIAL_EOD", "symbol": "NIFTY/VIX", "status": "degraded", "rows": 0,
+                         "missing_fields": [], "warnings": [str(exc)], "source": "nse_official"})
+    if official_date:
+        official_fetches = [
+            ("FII_DII", official.fii_dii, upsert_flows, "nse_official"),
+            ("PARTICIPANT_OI", official.participant_oi, upsert_participant_oi, "nse_official_archive"),
+            ("OPTIONS_EOD", official.nifty_options_eod, upsert_options, "nse_official_bhavcopy"),
+        ]
+        for dataset, loader, writer, provenance in official_fetches:
+            try:
+                frame = loader(official_date)
+                count = writer(db, frame)
+                fetched += count
+                statuses.append({"dataset": dataset, "symbol": dataset, "status": "complete", "rows": count,
+                                 "missing_fields": [], "warnings": [], "source": provenance})
+            except Exception as exc:
+                db.rollback()
+                statuses.append({"dataset": dataset, "symbol": dataset, "status": "degraded", "rows": 0,
+                                 "missing_fields": [], "warnings": [str(exc)], "source": provenance})
     today = date.today()
     for status in statuses:
         db.add(DataQualityLog(date=today, dataset=status["dataset"], status=status["status"],
                               missing_fields=status["missing_fields"], warnings=status["warnings"],
                               source_status={"source": status["source"], "rows": status["rows"]}))
     db.commit()
-    return {"rows_processed": fetched, "sources": statuses,
-            "status": "complete" if all(s["status"] == "complete" for s in statuses) else "partial"}
+    critical = {"NIFTY", "INDIA_VIX", "NSE_OFFICIAL_EOD", "FII_DII", "PARTICIPANT_OI", "OPTIONS_EOD"}
+    critical_ok = all(s["status"] != "degraded" for s in statuses if s["dataset"] in critical)
+    return {"rows_processed": fetched, "sources": statuses, "official_trading_date": official_date,
+            "status": "complete" if critical_ok else "partial"}
 
 
 def market_frame(db: Session, ticker: str) -> pd.DataFrame:
