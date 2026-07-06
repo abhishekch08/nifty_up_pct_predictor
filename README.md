@@ -36,21 +36,36 @@ retry → cache → validation → SQL database → timestamp-safe feature frame
 
 PostgreSQL is used in Docker/production. Local Python runs default to SQLite to keep first-run setup light.
 
-## Quick start with Docker
+## Quick start on Windows (no Docker or WSL)
 
-1. Copy `.env.example` to `.env` and set a strong `ADMIN_API_KEY` and `POSTGRES_PASSWORD`.
-2. Start the stack:
+Only Python 3.11 or newer is required. Download it from [python.org](https://www.python.org/downloads/) and select **Add Python to PATH** during installation.
 
-   ```bash
-   docker compose up --build
+1. Download or clone this repository.
+2. Double-click `run.bat`, or run it from PowerShell:
+
+   ```powershell
+   .\run.bat
    ```
 
-3. Open `http://localhost:3000`. API docs are at `http://localhost:8000/docs`.
-4. In Admin, enter the configured key, fetch market data, train a candidate, and deploy it if all gates pass.
+3. The first launch creates an isolated Python environment and installs the required packages. Later launches start immediately.
+4. The dashboard opens automatically at `http://127.0.0.1:8000`.
+5. Open **Admin**, enter `change-me`, then run **Fetch market data**, **Train candidate**, and **Deploy latest eligible**.
 
-The first 12-year data refresh and walk-forward run can take several minutes.
+Keep the launcher window open while using the app. Press `Ctrl+C` to stop it. The database, downloaded data, and trained models remain on your computer for the next launch. The first 12-year refresh and training run can take several minutes.
 
-## Local development
+To choose a private admin key, edit `backend/.env` after the first run and replace `ADMIN_API_KEY=change-me`.
+
+## Optional Docker setup
+
+Docker is not needed for normal local use. It remains available for server deployment or users who prefer PostgreSQL:
+
+```bash
+docker compose up --build
+```
+
+The Docker dashboard runs at `http://localhost:3000`; API documentation is at `http://localhost:8000/docs`.
+
+## Developer setup
 
 Backend:
 

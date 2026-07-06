@@ -1,4 +1,5 @@
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+// Empty by default so the bundled dashboard uses the same FastAPI origin.
+export const API_URL = import.meta.env.VITE_API_URL || ''
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, init)
@@ -25,4 +26,3 @@ export type Backtest = {
   calibration: { bucket: string; predicted: number; actual: number; count: number }[]
   threshold_analysis: { threshold: number; trades: number; hit_rate: number; total_return: number }[]
 }
-

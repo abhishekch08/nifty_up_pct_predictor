@@ -13,8 +13,9 @@ def test_health_and_admin_auth(tmp_path):
         with Local() as session: yield session
     app.dependency_overrides[get_db]=override
     with TestClient(app) as client:
+        assert client.get('/').status_code == 200
+        assert 'text/html' in client.get('/').headers['content-type']
         assert client.get('/api/health').status_code==200
         assert client.post('/api/admin/retrain-model').status_code==401
         assert client.get('/api/latest-prediction').status_code==404
     app.dependency_overrides.clear()
-

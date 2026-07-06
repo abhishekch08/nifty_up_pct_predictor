@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .api import router
 from .config import get_settings
@@ -29,8 +31,12 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list, allow_crede
                    allow_methods=["*"], allow_headers=["*"])
 app.include_router(router)
 
-
-@app.get("/")
-def root() -> dict:
-    return {"name": settings.app_name, "docs": "/docs", "health": "/api/health"}
-
+static_dir = Path(__file__).resolve().parent / "static"
+if static_dir.exists():
+    # The checked-in production frontend makes local use a single Python process.
+    # API and documentation routes are registered first and keep precedence.
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
+else:
+    @app.get("/")
+    def root() -> dict:
+        return {"name": settings.app_name, "docs": "/docs", "health": "/api/health"}
