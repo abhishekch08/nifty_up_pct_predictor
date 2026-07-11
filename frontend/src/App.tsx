@@ -2,15 +2,16 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Activity, AlertTriangle, AreaChart, ArrowDownRight, ArrowUpRight, BarChart3, BookOpen, BrainCircuit,
   CalendarClock, CheckCircle2, ChevronRight, Database, Gauge, Info, Layers3, Menu, RefreshCw,
-  Settings, ShieldCheck, SlidersHorizontal, Upload, X } from 'lucide-react'
+  Moon, Settings, ShieldCheck, SlidersHorizontal, Sun, Upload, X } from 'lucide-react'
 import { Area, AreaChart as ReArea, Bar, BarChart, CartesianGrid, Cell, Line, LineChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { api, Backtest, Factor, Prediction } from './api'
+  ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { api, Backtest, Factor, Prediction, StrategyCandidate, StrategyReport } from './api'
 
-type Page = 'overview' | 'flows' | 'derivatives' | 'options' | 'backtest' | 'calibration' | 'models' | 'methodology' | 'admin'
+type Page = 'overview' | 'strategy' | 'flows' | 'derivatives' | 'options' | 'backtest' | 'calibration' | 'models' | 'methodology' | 'admin'
 
 const nav: { id: Page; label: string; icon: typeof Gauge; help: string }[] = [
   { id: 'overview', label: 'Market Overview', icon: Gauge, help: 'Executive dashboard for the next Nifty session. Read this first: it combines the calibrated up-probability, expected return, model range, market regime, data quality, and the strongest feature-level drivers behind the current call.' },
+  { id: 'strategy', label: 'Strategy for Tomorrow', icon: CalendarClock, help: 'Defined-risk options strategy lab. It ranks capped-loss Nifty option structures using the model forecast, current option premiums, expected range, probability of profit and reward-to-risk.' },
   { id: 'flows', label: 'FII / DII Flows', icon: ArrowUpRight, help: 'Tracks official cash-market net buying/selling by foreign investors and domestic institutions. These flows often explain liquidity pressure, but the app treats them as after-close information and uses them only for the next session.' },
   { id: 'derivatives', label: 'F&O Positioning', icon: Layers3, help: 'Shows official end-of-day index futures/options positioning by participant class. Net long futures can indicate directional risk appetite; heavy option positioning can indicate hedging, dealer pressure, or crowded strikes.' },
   { id: 'options', label: 'Options Analytics', icon: SlidersHorizontal, help: 'Combines an expected-move calculator with official Nifty options EOD statistics. Use it to understand the market-implied trading band, put/call concentration, and key open-interest walls around spot.' },
@@ -38,6 +39,7 @@ function App() {
   const [dataStatus, setDataStatus] = useState<any>({ overall: 'unsafe', datasets: [] })
   const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(true)
+  const [theme, setTheme] = useState(() => localStorage.getItem('nifty-theme') || 'dark')
 
   const refresh = async () => {
     setLoading(true)
@@ -53,6 +55,7 @@ function App() {
     setLoading(false)
   }
   useEffect(() => { refresh() }, [])
+  useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('nifty-theme', theme) }, [theme])
   const currentNav = nav.find(n => n.id === page)
 
   return <div className="shell">
@@ -72,10 +75,11 @@ function App() {
       <header><button className="menu" onClick={() => setMobile(true)}><Menu/></button><div>
         <span className="eyebrow">NSE · NEXT SESSION INTELLIGENCE</span>
         <h1 className="page-heading">{currentNav?.label}<InfoTip text={currentNav?.help ?? ''}/></h1>
-      </div><div className="header-actions"><DataBadge status={prediction.data_quality}/><button className="icon-btn" onClick={refresh} title="Refresh"><RefreshCw className={loading ? 'spin' : ''} size={17}/></button></div></header>
+      </div><div className="header-actions"><button className="icon-btn" onClick={()=>setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle light/dark mode">{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button><DataBadge status={prediction.data_quality}/><button className="icon-btn" onClick={refresh} title="Refresh"><RefreshCw className={loading ? 'spin' : ''} size={17}/></button></div></header>
       {notice && <div className="notice"><AlertTriangle size={16}/><span>{notice}</span><button onClick={() => setNotice('')}><X size={15}/></button></div>}
       <div className="content">
         {page === 'overview' && <Overview prediction={prediction} backtest={backtest}/>} 
+        {page === 'strategy' && <StrategyTomorrow/>}
         {page === 'flows' && <Flows/>}
         {page === 'derivatives' && <Derivatives/>}
         {page === 'options' && <Options prediction={prediction}/>} 
@@ -156,10 +160,67 @@ function Options({prediction:p}:{prediction:Prediction}) {
   </div><div className="panel"><PanelTitle label="Options-chain analytics" note="Official NSE EOD bhavcopy" help="Summarizes the nearest valid Nifty options expiry from the official end-of-day bhavcopy. PCR, call wall and put wall reveal where open interest is concentrated, which can mark hedging pressure or crowded strike zones." />{chain && chain.status !== 'unavailable' ? <div className="calc-results"><div><span>PCR BY OI</span><b>{chain.pcr_oi?.toFixed(2) ?? '—'}</b></div><div><span>SPOT</span><b>{num(chain.spot)}</b></div><div><span>CALL WALL</span><b>{num(chain.call_wall)}</b></div><div><span>PUT WALL</span><b>{num(chain.put_wall)}</b></div><div><span>TOTAL CALL OI</span><b>{num(chain.total_call_oi)}</b></div><div><span>TOTAL PUT OI</span><b>{num(chain.total_put_oi)}</b></div></div> : <Empty text="Official NSE options EOD data has not been published yet. Restart later or use the CSV fallback."/>}</div></section>
 }
 
+function StrategyTomorrow() {
+  const [report,setReport]=useState<StrategyReport|null>(null)
+  const [error,setError]=useState('')
+  useEffect(()=>{api<StrategyReport>('/api/strategy/tomorrow').then(setReport).catch(e=>setError((e as Error).message))},[])
+  if (error) return <div className="panel"><Empty text={error}/></div>
+  if (!report) return <div className="panel"><Empty text="Ranking capped-risk strategies from the latest model forecast and option chain…"/></div>
+  if (report.status !== 'complete') return <div className="panel"><Empty text={report.warning || 'Strategy engine is waiting for prediction and options-chain data.'}/></div>
+  const selected=report.selected
+  const comparison=report.candidates.map(c=>({strategy:c.name, family:c.family, pop:c.probability_profit, expected_pl:c.expected_profit, max_profit:c.max_profit, max_loss:c.max_loss, rr:c.risk_reward ?? 0}))
+  const history=report.history.map(h=>({date:h.date, suggested:h.strategy, prob_up:h.probability_up, nifty_return:h.nifty_return, estimated_pl:h.estimated_pl, outcome:h.outcome}))
+  return <>
+    <section className="strategy-grid">
+      <div className="panel strategy-ticket">
+        <PanelTitle label="Strategy for tomorrow" note={`${report.next_trading_day} · nearest expiry ${report.expiry}`} help="The engine ranks only capped-loss Nifty option strategies. It uses the latest probability forecast, expected range, option premiums, probability of profit, expected value and reward/risk. Unlimited-loss structures are excluded."/>
+        <div className="strategy-search"><span>NIFTY</span><b>{num(report.spot)}</b><em>{report.prediction?.signal}</em></div>
+        <div className="selected-strategy">
+          <div><span>Selected strategy</span><h2>{selected.name}</h2><p>{selected.interpretation}</p></div>
+          <div className={`strategy-chip ${selected.family.toLowerCase()}`}>{selected.family}</div>
+        </div>
+        <div className="legs-table">
+          <div className="legs-head"><span>B/S</span><span>Expiry</span><span>Strike</span><span>Type</span><span>Lots</span><span>Price</span></div>
+          {selected.legs.map((leg,i)=><div className="leg-row" key={i}><b className={leg.action==='BUY'?'buy':'sell'}>{leg.action[0]}</b><span>{leg.expiry}</span><span>{num(leg.strike)}</span><span>{leg.type}</span><span>{leg.lots}</span><span>{leg.price.toFixed(2)}</span></div>)}
+        </div>
+        <div className="strategy-ready">
+          {['Bull Call Spread','Bull Put Spread','Bear Put Spread','Bear Call Spread','Iron Condor','Iron Butterfly','Long Straddle','Long Strangle'].map(name=><StrategyMini key={name} name={name} active={name===selected.name}/>)}
+        </div>
+      </div>
+      <div className="panel strategy-metrics">
+        <PanelTitle label="Why this strategy won" note="Reward, risk, probability and expected value" help="The chosen strategy is the highest ranked capped-loss candidate after combining expected P/L per lot, probability of profit, reward/risk and directional alignment with the model forecast."/>
+        <div className="strategy-kpis">
+          <div><span>Max profit</span><b className="green">{money(selected.max_profit)}</b></div>
+          <div><span>Max loss</span><b className="red">{money(-selected.max_loss)}</b></div>
+          <div><span>Reward / risk</span><b>{selected.risk_reward ? `${selected.risk_reward.toFixed(2)}x` : 'Open'}</b></div>
+          <div><span>Probability profit</span><b>{pct(selected.probability_profit)}</b></div>
+          <div><span>Expected P/L</span><b className={selected.expected_profit>=0?'green':'red'}>{money(selected.expected_profit)}</b></div>
+          <div><span>{selected.premium_label}</span><b>{money(Math.abs(selected.premium))}</b></div>
+        </div>
+        <div className="rationale"><b>Reasoning</b><p>{selected.rationale}</p><p>Breakeven: {selected.breakevens.length?selected.breakevens.map(num).join(', '):'Not inside displayed range'}.</p></div>
+      </div>
+    </section>
+    <section className="panel payoff-panel">
+      <PanelTitle label="Payoff graph" note="On-expiry and target-day P/L per lot" help="The green/red payoff line shows estimated expiry P/L across possible Nifty levels. The blue line is a conservative target-day approximation. Vertical markers show current spot and model expected range."/>
+      <ResponsiveContainer width="100%" height={360}><LineChart data={report.payoff_points}><CartesianGrid stroke="#d9e1df22" vertical={false}/><XAxis dataKey="spot" tickFormatter={num} stroke="#66807a"/><YAxis tickFormatter={moneyShort} stroke="#66807a"/><Tooltip contentStyle={tip} formatter={(v:any)=>money(Number(v))} labelFormatter={(v)=>`Nifty ${num(Number(v))}`}/><ReferenceLine y={0} stroke="#829992"/><ReferenceLine x={report.spot} stroke="#dce9e5" label="Spot"/><ReferenceLine x={report.prediction?.expected_lower_range} stroke="#f06a69" strokeDasharray="4 4" label="Lower"/><ReferenceLine x={report.prediction?.expected_upper_range} stroke="#51e6a6" strokeDasharray="4 4" label="Upper"/><Line dataKey="expiry_pl" name="On Expiry" stroke="#16a36f" strokeWidth={2} dot={false}/><Line dataKey="target_pl" name="On Target Date" stroke="#0b75df" strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer>
+    </section>
+    <section className="two-col">
+      <div className="panel table-panel"><PanelTitle label="Strategy comparison" note="Capped-loss candidates ranked by score" help="Compares the shortlisted defined-risk strategies. The final choice is not simply the largest payoff; it balances max loss, probability of profit, expected value and model direction."/><Table columns={['strategy','family','pop','expected_pl','max_profit','max_loss','rr']} rows={comparison}/></div>
+      <div className="panel table-panel"><PanelTitle label="Past results of suggested strategy" note="Replay of what would have been suggested earlier" help="Historical replay uses prior saved predictions and actual next-day Nifty closes. When exact historical option premiums are unavailable, results are estimated with a consistent proxy spread model and should be read directionally."/><Table columns={['date','suggested','prob_up','nifty_return','estimated_pl','outcome']} rows={history}/></div>
+    </section>
+    <Disclaimer/>
+  </>
+}
+
+function StrategyMini({name,active}:{name:string;active:boolean}) {
+  const isBear=name.toLowerCase().includes('bear'), isVol=name.toLowerCase().includes('straddle')||name.toLowerCase().includes('strangle')
+  return <div className={active?'strategy-mini active':'strategy-mini'}><svg viewBox="0 0 80 48"><path d={isVol?'M8 34 L25 34 L40 12 L55 34 L72 34':isBear?'M8 12 L34 32 L72 32':'M8 34 L34 34 L72 12'} fill="none" stroke={isBear?'#f06a69':'#16a36f'} strokeWidth="3"/><path d="M8 34 H72" stroke="#b8c7c3" strokeDasharray="4 4"/></svg><span>{name}</span></div>
+}
+
 function BacktestPage({data}:{data:Backtest|null}) {
   return <>{!data ? <div className="panel"><Empty text="Run model training to generate a walk-forward backtest."/></div> : <>
     <section className="kpi-row"><Kpi label="Accuracy" value={pct(Number(data.metrics.accuracy))} sub="Out of sample" help="Share of walk-forward days where the model's probability crossed 50% in the correct direction. Useful but incomplete because it ignores confidence and probability calibration."/><Kpi label="Balanced accuracy" value={pct(Number(data.metrics.balanced_accuracy))} sub="Class adjusted" help="Average of up-day accuracy and down-day accuracy. This prevents the score from looking good merely because one class, such as up days, occurs more often."/><Kpi label="Return MAE" value={pct(Number(data.metrics.mae_return))} sub="Regression error" help="Mean absolute error of the expected-return model. This is used in the expected-range calculation as a cushion for typical forecast error."/><Kpi label="Log loss" value={Number(data.metrics.log_loss).toFixed(3)} sub="Probability penalty" help="Probability scoring metric that heavily penalizes confident wrong forecasts. Lower log loss means the model is less reckless with high-conviction predictions."/></section>
-    <section className="panel"><PanelTitle label="Signal equity curve" note="55/45 thresholds · 3 bps costs" help="Hypothetical out-of-sample equity curve from a simple signal rule: long when P(up) ≥ 55%, short when P(up) ≤ 45%, otherwise flat, with 3 bps transaction cost per active trade. It is a stress-test of signal usefulness, not an executable trading system."/><ResponsiveContainer width="100%" height={360}><ReArea data={data.equity_curve}><defs><linearGradient id="eq" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#51e6a6" stopOpacity={.4}/><stop offset="1" stopColor="#51e6a6" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#1b302c" vertical={false}/><XAxis dataKey="date" hide/><YAxis stroke="#66807a" domain={['auto','auto']}/><Tooltip contentStyle={tip}/><Area dataKey="equity" stroke="#51e6a6" fill="url(#eq)" strokeWidth={2}/></ReArea></ResponsiveContainer></section>
+    <section className="panel"><PanelTitle label="Nifty vs model strategy curve" note="Both curves normalized to Nifty price axis" help="The model strategy curve starts at the same Nifty price as the backtest and compounds the 55/45 signal returns after 3 bps costs. It is plotted against actual Nifty close on the same Y-axis, so relative performance is visually comparable in index points."/><ResponsiveContainer width="100%" height={360}><LineChart data={(data.price_curve?.length ? data.price_curve : data.equity_curve) as any[]}><CartesianGrid stroke="#1b302c" vertical={false}/><XAxis dataKey="date" hide/><YAxis stroke="#66807a" domain={['auto','auto']} tickFormatter={num}/><Tooltip contentStyle={tip} formatter={(v:any)=>num(Number(v))}/><Line dataKey="nifty_close" name="Actual Nifty 50" stroke="#8fb5ff" strokeWidth={2} dot={false}/><Line dataKey="model_strategy_close" name="Model strategy equivalent" stroke="#51e6a6" strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></section>
     <section className="panel table-panel"><PanelTitle label="Threshold analysis" note="Expected value after transaction costs" help="Compares different probability cutoffs. Higher thresholds trade less often but require stronger model confidence; the table shows trade count, hit rate and total out-of-sample return after the assumed cost."/><Table columns={['threshold','trades','hit_rate','total_return']} rows={data.threshold_analysis}/></section>
   </>}</>
 }
@@ -494,7 +555,8 @@ function Kpi({label,value,sub,help}:{label:string;value:string;sub:string;help?:
 function FactorList({title,factors,kind}:{title:string;factors:Factor[];kind:'up'|'down'}) {return <div className="factors"><h4 className={kind==='up'?'green':'red'}>{title}</h4>{factors.length?factors.map((f,i)=><div className="factor" key={f.feature}><i>{i+1}</i><div><b>{f.interpretation}</b><small>{f.feature} · {f.value==null?'missing':Number(f.value).toFixed(3)}</small></div><em>{f.impact==null?'':signedPct(f.impact)}</em></div>):<p className="muted">Awaiting model attribution.</p>}</div>}
 function DataBadge({status}:{status:string}){return <div className={`data-badge ${status.toLowerCase()}`}><i/>{status} data<InfoTip text="Data quality is based on the latest row's completeness versus the deployed model's required features. Complete means at least 90% of required model inputs are present; Partial, Degraded and Unsafe indicate progressively more missing inputs." compact/></div>}
 function Empty({text}:{text:string}){return <div className="empty"><Database/><b>Waiting for verified data</b><p>{text}</p></div>}
-function Table({columns,rows}:{columns:string[];rows:any[]}) {return <div className="table-scroll"><table><thead><tr>{columns.map(c=><th key={c}>{c.replaceAll('_',' ')}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{columns.map(c=><td key={c}>{typeof r[c]==='number'?(c.includes('rate')||c.includes('return')?pct(r[c]):num(r[c])):String(r[c]??'—')}</td>)}</tr>)}</tbody></table></div>}
+function Table({columns,rows}:{columns:string[];rows:any[]}) {return <div className="table-scroll"><table><thead><tr>{columns.map(c=><th key={c}>{c.replaceAll('_',' ')}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{columns.map(c=><td key={c}>{formatCell(c,r[c])}</td>)}</tr>)}</tbody></table></div>}
+function formatCell(c:string,v:any){if(typeof v==='number'){if(c==='rr')return v?`${v.toFixed(2)}x`:'—';if(c.includes('pl')||c.includes('profit')||c.includes('loss'))return money(v);if(c.includes('pop')||c.includes('prob')||c.includes('rate')||c.includes('return'))return pct(v);return num(v)}return String(v??'—')}
 function Action({icon:Icon,title,desc,button,busy,onClick}:{icon:any;title:string;desc:string;button:string;busy:boolean;onClick:()=>void}){return <div className="panel action"><div className="action-top"><div className="action-icon"><Icon/></div><InfoTip text={desc}/></div><h3>{title}</h3><p>{desc}</p><button onClick={onClick} disabled={busy}>{busy?'Working…':button}</button></div>}
 function Gate({text,help}:{text:string;help?:string}){return <div className="gate"><CheckCircle2/>{text}<InfoTip text={help || text} compact/></div>}
 function InfoTip({text,compact=false}:{text:string;compact?:boolean}){return <span className={compact?'info-tip compact':'info-tip'} tabIndex={0} aria-label={text}><Info size={compact?12:14}/><span className="info-bubble">{text}</span></span>}
@@ -503,6 +565,8 @@ function tone(s:string){return s.toLowerCase().includes('bull')?'bull':s.toLower
 function pct(v:number){return Number.isFinite(v)?`${(v*100).toFixed(1)}%`:'—'}
 function signedPct(v:number){return Number.isFinite(v)?`${v>=0?'+':''}${(v*100).toFixed(2)}%`:'—'}
 function num(v:number){return v?new Intl.NumberFormat('en-IN',{maximumFractionDigits:2}).format(v):'—'}
+function money(v:number){return Number.isFinite(v)?`${v>=0?'+':'-'}₹${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(Math.abs(v))}`:'—'}
+function moneyShort(v:number){if(!Number.isFinite(v))return '—';const a=Math.abs(v),s=v<0?'-':'';return a>=100000?`${s}₹${(a/100000).toFixed(1)}L`:a>=1000?`${s}₹${(a/1000).toFixed(0)}k`:`${s}₹${a.toFixed(0)}`}
 function metric(b:Backtest|null,k:string,d=1){return b&&typeof b.metrics[k]==='number'?(k.includes('accuracy')?pct(Number(b.metrics[k])):Number(b.metrics[k]).toFixed(d)):'—'}
 const tip={background:'#0c1715',border:'1px solid #263d38',borderRadius:8,color:'#dce9e5'}
 

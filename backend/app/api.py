@@ -8,10 +8,12 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .database import get_db
+from .data_sources import SYMBOLS
 from .models import (BacktestResult, DataQualityLog, EventFlag, FlowDaily,
-                     ModelVersion, ParticipantOI, Prediction)
+                     MarketDaily, ModelVersion, ParticipantOI, Prediction)
 from .services import (deploy_model, fetch_market_data, generate_prediction,
                        parse_upload, retrain, serialize_prediction)
+from .strategy import strategy_history, strategy_report
 
 router = APIRouter(prefix="/api")
 
@@ -100,12 +102,22 @@ def options_latest(db: Session = Depends(get_db)) -> dict:
             "pcr_oi": puts / calls if calls else None, "call_wall": call_wall, "put_wall": put_wall}
 
 
+@router.get("/strategy/tomorrow")
+def strategy_tomorrow(db: Session = Depends(get_db)) -> dict:
+    return strategy_report(db)
+
+
+@router.get("/strategy/history")
+def strategy_history_endpoint(limit: int = Query(default=18, ge=1, le=250), db: Session = Depends(get_db)) -> list[dict]:
+    return strategy_history(db, limit)
+
+
 @router.get("/backtest/latest")
 def backtest_latest(db: Session = Depends(get_db)) -> dict:
     row = db.scalar(select(BacktestResult).order_by(BacktestResult.id.desc()))
     if not row:
         raise HTTPException(404, "No backtest available")
-    return _backtest_dict(row)
+    return _backtest_dict(row, db)
 
 
 @router.get("/backtest/model/{model_version}")
@@ -113,7 +125,7 @@ def backtest_model(model_version: str, db: Session = Depends(get_db)) -> dict:
     row = db.scalar(select(BacktestResult).where(BacktestResult.model_version == model_version).order_by(BacktestResult.id.desc()))
     if not row:
         raise HTTPException(404, "Backtest not found")
-    return _backtest_dict(row)
+    return _backtest_dict(row, db)
 
 
 @router.get("/calibration/latest")
@@ -180,8 +192,30 @@ def add_event(payload: EventRequest, db: Session = Depends(get_db)) -> dict:
     return {"id": row.id, **payload.model_dump()}
 
 
-def _backtest_dict(row: BacktestResult) -> dict:
+def _backtest_dict(row: BacktestResult, db: Session) -> dict:
     return {"model_version": row.model_version, "start_date": row.start_date, "end_date": row.end_date,
             "metrics": row.metrics, "equity_curve": row.equity_curve, "calibration": row.calibration,
-            "threshold_analysis": row.threshold_analysis}
+            "threshold_analysis": row.threshold_analysis, "price_curve": _price_curve(row, db)}
 
+
+def _price_curve(row: BacktestResult, db: Session) -> list[dict]:
+    if not row.equity_curve:
+        return []
+    dates = [date.fromisoformat(item.get("date")) for item in row.equity_curve if item.get("date")]
+    market_rows = db.scalars(select(MarketDaily).where(
+        MarketDaily.symbol == SYMBOLS["NIFTY"], MarketDaily.date.in_(dates))).all()
+    closes = {r.date.isoformat(): r.close for r in market_rows}
+    first_equity = row.equity_curve[0].get("equity") or 1
+    first_close = closes.get(row.equity_curve[0].get("date"))
+    if not first_close:
+        return []
+    output = []
+    for item in row.equity_curve:
+        day = item.get("date")
+        close = closes.get(day)
+        equity = item.get("equity")
+        if close is None or equity is None:
+            continue
+        output.append({"date": day, "nifty_close": close,
+                       "model_strategy_close": first_close * float(equity) / float(first_equity)})
+    return output
