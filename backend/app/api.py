@@ -103,12 +103,12 @@ def options_latest(db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/strategy/tomorrow")
-def strategy_tomorrow(db: Session = Depends(get_db)) -> dict:
-    return strategy_report(db)
+def strategy_tomorrow(expiry: date | None = Query(default=None), db: Session = Depends(get_db)) -> dict:
+    return strategy_report(db, expiry)
 
 
 @router.get("/strategy/history")
-def strategy_history_endpoint(limit: int = Query(default=18, ge=1, le=250), db: Session = Depends(get_db)) -> list[dict]:
+def strategy_history_endpoint(limit: int = Query(default=14, ge=1, le=250), db: Session = Depends(get_db)) -> list[dict]:
     return strategy_history(db, limit)
 
 

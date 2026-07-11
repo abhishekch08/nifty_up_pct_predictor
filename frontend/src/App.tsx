@@ -3,9 +3,9 @@ import type { ReactNode } from 'react'
 import { Activity, AlertTriangle, AreaChart, ArrowDownRight, ArrowUpRight, BarChart3, BookOpen, BrainCircuit,
   CalendarClock, CheckCircle2, ChevronRight, Database, Gauge, Info, Layers3, Menu, RefreshCw,
   Moon, Settings, ShieldCheck, SlidersHorizontal, Sun, Upload, X } from 'lucide-react'
-import { Area, AreaChart as ReArea, Bar, BarChart, CartesianGrid, Cell, Line, LineChart,
+import { Area, AreaChart as ReArea, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, LineChart,
   ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { api, Backtest, Factor, Prediction, StrategyCandidate, StrategyReport } from './api'
+import { api, Backtest, Factor, Prediction, StrategyCandidate, StrategyLeg, StrategyReport } from './api'
 
 type Page = 'overview' | 'strategy' | 'flows' | 'derivatives' | 'options' | 'backtest' | 'calibration' | 'models' | 'methodology' | 'admin'
 
@@ -162,6 +162,233 @@ function Options({prediction:p}:{prediction:Prediction}) {
 
 function StrategyTomorrow() {
   const [report,setReport]=useState<StrategyReport|null>(null)
+  const [expiry,setExpiry]=useState('')
+  const [selectedName,setSelectedName]=useState('')
+  const [legs,setLegs]=useState<StrategyLeg[]>([])
+  const [tab,setTab]=useState<'graph'|'pl'|'greeks'|'chart'>('graph')
+  const [error,setError]=useState('')
+  const [loading,setLoading]=useState(false)
+  useEffect(()=>{
+    let alive=true
+    setLoading(true); setError('')
+    api<StrategyReport>(`/api/strategy/tomorrow${expiry ? `?expiry=${expiry}` : ''}`).then(r=>{
+      if(!alive) return
+      setReport(r); setLoading(false)
+      if(r.status==='complete'){
+        setSelectedName(r.selected.name)
+        setLegs(cloneLegs(r.selected.legs))
+        if(!expiry) setExpiry(r.expiry)
+      }
+    }).catch(e=>{if(alive){setError((e as Error).message);setLoading(false)}})
+    return()=>{alive=false}
+  },[expiry])
+  if (error) return <div className="panel"><Empty text={error}/></div>
+  if (!report) return <div className="panel"><Empty text="Ranking capped-risk strategies from the latest model forecast and option chain…"/></div>
+  if (report.status !== 'complete') return <div className="panel"><Empty text={report.warning || 'Strategy engine is waiting for prediction and options-chain data.'}/></div>
+  const selected=report.candidates.find(c=>c.name===selectedName)||report.selected
+  const activeLegs=legs.length ? legs : cloneLegs(selected.legs)
+  const payoff=buildStrategyPayoff(report, activeLegs)
+  const summary=summarizeStrategy(report, selected, activeLegs, payoff)
+  const chartData=attachOiBars(payoff.points, report.oi_bars||[])
+  const comparison=report.candidates.map(c=>({strategy:c.name, family:c.family, pop:c.probability_profit, expected_pl:c.expected_profit, max_profit:c.max_profit, max_loss:-c.max_loss, rr:c.risk_reward ?? 0}))
+  const history=report.history.slice(0,14).map(h=>({date:h.date, suggested:h.strategy, prob_up:h.probability_up, nifty_return:h.nifty_return, estimated_pl:h.estimated_pl, outcome:h.outcome}))
+  const expiryOptions=report.expiries?.length ? report.expiries : [{expiry:report.expiry,label:report.expiry,days:0}]
+  const strikeStep=strikeStepFromChain(report.option_chain)||50
+  const lotValue=activeLegs[0]?.lots || 1
+  const updateLeg=(index:number, patch:Partial<StrategyLeg>)=>setLegs(prev=>prev.map((leg,i)=>{
+    if(i!==index) return leg
+    const next={...leg,...patch}
+    if(patch.strike!==undefined || patch.type!==undefined || patch.expiry!==undefined) next.price=marketPrice(report,next) ?? next.price
+    return next
+  }))
+  const chooseCandidate=(candidate:StrategyCandidate)=>{setSelectedName(candidate.name);setLegs(cloneLegs(candidate.legs));setTab('graph')}
+  const shiftAll=(amount:number)=>setLegs(prev=>prev.map(leg=>{const next={...leg,strike:Math.max(strikeStep, leg.strike+amount)};return {...next,price:marketPrice(report,next) ?? next.price}}))
+  const multiplyLots=(lots:number)=>setLegs(prev=>prev.map(leg=>({...leg,lots:Math.max(1,lots||1)})))
+  const resetPrices=()=>setLegs(prev=>prev.map(leg=>({...leg,price:marketPrice(report,leg) ?? leg.price})))
+  const clearStrategy=()=>setLegs([])
+  return <>
+    <section className="strategy-builder">
+      <div className="strategy-left">
+        <div className="strategy-topbar">
+          <div className="strategy-search"><span>NIFTY</span><b>{num(report.spot)}</b><em>{report.prediction?.signal}</em></div>
+          <button className="settings-pill" type="button"><Settings size={16}/> Settings</button>
+        </div>
+        <div className="panel strategy-ticket sensi-card">
+          <PanelTitle label="New Strategy" note={`${activeLegs.length} selected - ${selected.name}`} help="Editable version of the suggested capped-loss strategy. Change expiry, strike, option type, lots or entry price and the payoff graph, max profit/loss, breakevens and estimated P/L recalculate immediately. Changing the main expiry reruns the backend ranking from that expiry's option chain."/>
+          <div className="ticket-actions"><button onClick={clearStrategy}>Clear New Trades</button><button onClick={resetPrices}><RefreshCw size={15}/> Reset Prices</button></div>
+          <div className="legs-table editable">
+            <div className="legs-head"><span></span><span>B/S</span><span>Expiry</span><span>Strike</span><span>Type</span><span>Lots</span><span>Price</span></div>
+            {activeLegs.map((leg,i)=><div className="leg-row" key={`${i}-${leg.action}-${leg.type}-${leg.strike}`}>
+              <input aria-label="Include leg" type="checkbox" checked readOnly/>
+              <select className={leg.action==='BUY'?'buy-select':'sell-select'} value={leg.action} onChange={e=>updateLeg(i,{action:e.target.value as 'BUY'|'SELL'})}><option value="BUY">B</option><option value="SELL">S</option></select>
+              <select value={expiry} onChange={e=>setExpiry(e.target.value)}>{expiryOptions.map(x=><option key={x.expiry} value={x.expiry}>{x.label}</option>)}</select>
+              <div className="step-input"><button onClick={()=>updateLeg(i,{strike:leg.strike-strikeStep})}>−</button><input type="number" step={strikeStep} value={leg.strike} onChange={e=>updateLeg(i,{strike:+e.target.value})}/><button onClick={()=>updateLeg(i,{strike:leg.strike+strikeStep})}>+</button></div>
+              <select value={leg.type} onChange={e=>updateLeg(i,{type:e.target.value as 'CE'|'PE'})}><option>CE</option><option>PE</option></select>
+              <input type="number" min="1" value={leg.lots} onChange={e=>updateLeg(i,{lots:Math.max(1,+e.target.value||1)})}/>
+              <input type="number" step="0.05" value={leg.price} onChange={e=>updateLeg(i,{price:+e.target.value})}/>
+            </div>)}
+          </div>
+          <div className="builder-strip">
+            <div>Shift <button onClick={()=>shiftAll(-strikeStep)}>−</button><button onClick={()=>shiftAll(strikeStep)}>+</button></div>
+            <div>Multiplier <input type="number" min="1" value={lotValue} onChange={e=>multiplyLots(+e.target.value)}/></div>
+            <div className="premium-readout"><span>{summary.premium>=0?'Premium Receive':'Price Pay'}</span><b>{money(Math.abs(summary.premium))}</b></div>
+          </div>
+          <div className="builder-buttons"><button>Add/Edit</button><button>Add to Drafts</button><button disabled>Trade All</button></div>
+        </div>
+        <div className="panel ready-panel">
+          <div className="ready-head"><b>Ready-made</b><span>Click a capped-loss template to load it</span><label>Expiry <select value={expiry} onChange={e=>setExpiry(e.target.value)}>{expiryOptions.map(x=><option key={x.expiry} value={x.expiry}>{x.label}</option>)}</select></label></div>
+          <div className="strategy-ready">
+            {report.candidates.map(candidate=><button type="button" key={candidate.name} onClick={()=>chooseCandidate(candidate)}><StrategyMini name={candidate.name} active={candidate.name===selected.name}/></button>)}
+          </div>
+        </div>
+      </div>
+      <div className="strategy-right">
+        <div className="panel sensi-summary">
+          <div><span>Max Profit</span><b className="green">{money(summary.maxProfit)}</b></div>
+          <div><span>Max Loss <InfoTip text="Maximum estimated loss at expiry across the displayed price grid. It is shown as a negative number because it is money at risk, and all candidate strategies are filtered to avoid unlimited loss."/></span><b className="red">{money(-summary.maxLoss)}</b></div>
+          <div><span>Breakeven</span><b>{summary.breakevens.length ? summary.breakevens.map(num).join(', ') : '—'}</b></div>
+          <div><span>Reward / Risk</span><b>{summary.riskReward?`${summary.riskReward.toFixed(2)}x`:'—'}</b></div>
+          <div><span>POP</span><b>{pct(summary.probabilityProfit)}</b></div>
+          <div><span>Funds & Margins</span><b>{money(summary.margin)}</b></div>
+        </div>
+        <div className="panel payoff-panel sensi-card">
+          <PanelTitle label="Suggested strategy payoff" note={`${selected.name} · ${expiryOptions.find(x=>x.expiry===expiry)?.label || report.expiry}`} help="Sensibull-style payoff workspace for the current suggested/edited strategy. Green/red bars are open-interest concentration from the stored Nifty options chain; payoff lines update with the selected expiry, strikes, option type, lot count and entry prices."/>
+          <div className="payoff-tabs">
+            {(['graph','pl','greeks','chart'] as const).map(item=><button className={tab===item?'active':''} onClick={()=>setTab(item)} key={item}>{item==='graph'?'Payoff Graph':item==='pl'?'P&L Table':item==='greeks'?'Greeks':'Strategy Chart'}</button>)}
+            <label className="booked-toggle"><input type="checkbox" checked readOnly/> Add Booked P&L</label>
+          </div>
+          {tab==='graph' && <StrategyPayoffGraph data={chartData} report={report} selected={selected} summary={summary}/>}
+          {tab==='pl' && <StrategyPLTable legs={activeLegs} report={report}/>}
+          {tab==='greeks' && <StrategyGreeks legs={activeLegs} report={report}/>}
+          {tab==='chart' && <StrategyPriceChart data={chartData}/>}
+          <div className="strategy-lower">
+            <div><b>Strikewise IVs</b>{activeLegs.map((leg,i)=><p key={i}>{num(leg.strike)} {leg.type} · {expiryLabel(leg.expiry, expiryOptions)} · IV {(report.prediction?.india_vix||14).toFixed(1)}%</p>)}</div>
+            <div><b>Target Day Futures Prices</b><p>{expiryLabel(report.expiry, expiryOptions)} FUT {num(report.spot*(1+(report.prediction?.expected_return||0)))}</p><p>1 SD {num(report.prediction?.expected_lower_range||0)} / {num(report.prediction?.expected_upper_range||0)}</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section className="strategy-grid">
+      <div className="panel strategy-metrics">
+        <PanelTitle label="Why this strategy won" note="Reward, risk, probability and expected value" help="The chosen strategy is the highest ranked capped-loss candidate after combining expected P/L per lot, probability of profit, reward/risk and directional alignment with the model forecast."/>
+        <div className="strategy-kpis">
+          <div><span>Max profit</span><b className="green">{money(summary.maxProfit)}</b></div>
+          <div><span>Max loss</span><b className="red">{money(-summary.maxLoss)}</b></div>
+          <div><span>Reward / risk</span><b>{summary.riskReward ? `${summary.riskReward.toFixed(2)}x` : '—'}</b></div>
+          <div><span>Probability profit</span><b>{pct(summary.probabilityProfit)}</b></div>
+          <div><span>Expected P/L</span><b className={summary.expectedProfit>=0?'green':'red'}>{money(summary.expectedProfit)}</b></div>
+          <div><span>{summary.premium>=0?'Credit received':'Debit paid'}</span><b>{money(Math.abs(summary.premium))}</b></div>
+        </div>
+        <div className="rationale"><b>Reasoning</b><p>{selected.rationale}</p><p>{selected.interpretation}</p><p>Breakeven: {summary.breakevens.length?summary.breakevens.map(num).join(', '):'Not inside displayed range'}.</p>{loading&&<p>Refreshing expiry data…</p>}</div>
+      </div>
+      <div className="panel selected-strategy">
+        <div><span>Selected strategy</span><h2>{selected.name}</h2><p>{selected.interpretation}</p></div>
+        <div className={`strategy-chip ${selected.family.toLowerCase()}`}>{selected.family}</div>
+      </div>
+    </section>
+    <section className="two-col">
+      <div className="panel table-panel"><PanelTitle label="Strategy comparison" note="Capped-loss candidates ranked by score" help="Compares the shortlisted defined-risk strategies. Max loss is shown negative because it is the amount at risk. The final choice is not simply the largest payoff; it balances max loss, probability of profit, expected value and model direction."/><Table columns={['strategy','family','pop','expected_pl','max_profit','max_loss','rr']} rows={comparison}/></div>
+      <div className="panel table-panel"><PanelTitle label="Past results of suggested strategy" note="Last 14 replay observations" help="Historical replay uses prior saved predictions and actual next-day Nifty closes. When exact historical option premiums are unavailable, results are estimated with a consistent proxy spread model and should be read directionally."/><Table columns={['date','suggested','prob_up','nifty_return','estimated_pl','outcome']} rows={history}/></div>
+    </section>
+    <Disclaimer/>
+  </>
+}
+
+function StrategyPayoffGraph({data,report,selected,summary}:{data:any[];report:StrategyReport;selected:StrategyCandidate;summary:any}) {
+  return <div className="strategy-chart-wrap">
+    <div className="oi-legend"><span>OI data at {num(nearestStrike(report.spot, report.option_chain))}</span><i className="call"/> Call OI <b>{oiTotal(report.oi_bars,'call_oi')}</b><i className="put"/> Put OI <b>{oiTotal(report.oi_bars,'put_oi')}</b><em>— On Expiry</em><em className="blue">— On Target Date</em></div>
+    <ResponsiveContainer width="100%" height={390}><ComposedChart data={data}><CartesianGrid stroke="#d9e1df22" vertical={false}/><XAxis dataKey="spot" tickFormatter={num} stroke="#66807a"/><YAxis yAxisId="pl" tickFormatter={moneyShort} stroke="#66807a" label={{value:'Profit / loss',angle:-90,position:'insideLeft'}}/><YAxis yAxisId="oi" orientation="right" tickFormatter={(v)=>`${Number(v).toFixed(0)}L`} stroke="#66807a" label={{value:'Open Interest',angle:90,position:'insideRight'}}/><Tooltip content={<StrategyTooltip/>}/><ReferenceLine yAxisId="pl" y={0} stroke="#829992"/><ReferenceLine yAxisId="pl" x={report.spot} stroke="#dce9e5" label="Current price"/><ReferenceLine yAxisId="pl" x={report.prediction?.expected_lower_range} stroke="#f06a69" strokeDasharray="4 4" label="-1SD"/><ReferenceLine yAxisId="pl" x={report.prediction?.expected_upper_range} stroke="#51e6a6" strokeDasharray="4 4" label="1SD"/><Bar yAxisId="oi" dataKey="put_oi_lakh" name="Put OI" fill="#a7eab2" opacity={0.45}/><Bar yAxisId="oi" dataKey="call_oi_lakh" name="Call OI" fill="#f3a6a2" opacity={0.45}/><Line yAxisId="pl" dataKey="expiry_pl" name="On Expiry" stroke="#16a36f" strokeWidth={2.4} dot={false}/><Line yAxisId="pl" dataKey="target_pl" name="On Target Date" stroke="#0b75df" strokeWidth={2.4} dot={false}/></ComposedChart></ResponsiveContainer>
+    <div className="target-pill">Projected P/L at model target: {money(summary.expectedProfit)} · {selected.name}</div>
+  </div>
+}
+
+function StrategyTooltip({active,payload,label}:any) {
+  if(!active || !payload?.length) return null
+  const row=payload[0]?.payload || {}
+  return <div className="strategy-tooltip"><span>When price is at</span><b>{num(Number(label))}</b><hr/><p>Expiry P/L <strong>{money(row.expiry_pl||0)}</strong></p><p>Target-day P/L <strong>{money(row.target_pl||0)}</strong></p>{(row.call_oi_lakh||row.put_oi_lakh) ? <p>OI bars <strong>CE {row.call_oi_lakh?.toFixed?.(1)||0}L · PE {row.put_oi_lakh?.toFixed?.(1)||0}L</strong></p> : null}</div>
+}
+
+function StrategyPLTable({legs,report}:{legs:StrategyLeg[];report:StrategyReport}) {
+  const target=report.spot*(1+(report.prediction?.expected_return||0))
+  const rows=legs.map(leg=>{
+    const entry=leg.price*report.lot_size*leg.lots
+    const targetValue=optionIntrinsic(leg,target)*report.lot_size*leg.lots
+    const targetPl=leg.action==='BUY'?targetValue-entry:entry-targetValue
+    return {instrument:`${leg.action[0]} ${leg.lots} x ${expiryLabel(leg.expiry,report.expiries)} ${num(leg.strike)} ${leg.type}`, target_pl:targetPl, target_price:optionIntrinsic(leg,target), entry_price:leg.price, ltp:leg.price}
+  })
+  const total=rows.reduce((a,r)=>a+r.target_pl,0)
+  return <div className="strategy-table-block"><Table columns={['instrument','target_pl','target_price','entry_price','ltp']} rows={[...rows,{instrument:'Total projected',target_pl:total,target_price:null,entry_price:null,ltp:null}]}/></div>
+}
+
+function StrategyGreeks({legs,report}:{legs:StrategyLeg[];report:StrategyReport}) {
+  const rows=legs.map(leg=>{
+    const sign=leg.action==='BUY'?1:-1
+    const moneyness=(report.spot-leg.strike)/(report.spot*0.012)
+    const callDelta=1/(1+Math.exp(-moneyness))
+    const rawDelta=leg.type==='CE'?callDelta:callDelta-1
+    return {instrument:`${leg.action[0]} ${leg.lots} x ${num(leg.strike)} ${leg.type}`, delta:sign*rawDelta*leg.lots, theta:sign*-leg.price*.04*leg.lots, decay:sign*-leg.price*.18*leg.lots, gamma:sign*.0001*leg.lots, vega:sign*leg.price*.06*leg.lots}
+  })
+  const total=(key:keyof typeof rows[number])=>rows.reduce((a,r)=>a+Number(r[key]||0),0)
+  return <div className="strategy-table-block"><Table columns={['instrument','delta','theta','decay','gamma','vega']} rows={[...rows,{instrument:'Total approx.',delta:total('delta'),theta:total('theta'),decay:total('decay'),gamma:total('gamma'),vega:total('vega')}]}/></div>
+}
+
+function StrategyPriceChart({data}:{data:any[]}) {
+  return <ResponsiveContainer width="100%" height={350}><LineChart data={data}><CartesianGrid stroke="#d9e1df22" vertical={false}/><XAxis dataKey="spot" tickFormatter={num} stroke="#66807a"/><YAxis tickFormatter={moneyShort} stroke="#66807a"/><Tooltip contentStyle={tip} formatter={(v:any)=>money(Number(v))}/><Line dataKey="target_pl" name="Strategy Price / Target P&L" stroke="#0b75df" strokeWidth={2} dot={false}/><Line dataKey="expiry_pl" name="Expiry P&L" stroke="#16a36f" strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer>
+}
+
+function StrategyMini({name,active}:{name:string;active:boolean}) {
+  const paths=strategyIconPaths(name)
+  return <div className={active?'strategy-mini active':'strategy-mini'}><svg viewBox="0 0 80 48"><path d="M8 34 H72" stroke="#b8c7c3" strokeDasharray="4 4"/>{paths.map((p,i)=><path key={i} d={p.d} fill="none" stroke={p.color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round"/>)}</svg><span>{name}</span></div>
+}
+
+function strategyIconPaths(name:string) {
+  const green='#16a36f', red='#f06a69'
+  const map:Record<string,{d:string;color:string}[]>={
+    'Bull Call Spread':[{d:'M8 36 L30 36',color:red},{d:'M30 36 L52 14',color:green},{d:'M52 14 L72 14',color:green}],
+    'Bull Put Spread':[{d:'M8 36 L28 36',color:red},{d:'M28 36 L44 22',color:green},{d:'M44 22 L72 22',color:green}],
+    'Bear Put Spread':[{d:'M8 14 L30 14',color:green},{d:'M30 14 L52 36',color:red},{d:'M52 36 L72 36',color:red}],
+    'Bear Call Spread':[{d:'M8 22 L36 22',color:green},{d:'M36 22 L52 36',color:red},{d:'M52 36 L72 36',color:red}],
+    'Iron Condor':[{d:'M8 36 L24 36',color:red},{d:'M24 36 L34 20',color:green},{d:'M34 20 L48 20',color:green},{d:'M48 20 L58 36',color:red},{d:'M58 36 L72 36',color:red}],
+    'Iron Butterfly':[{d:'M8 36 L30 36',color:red},{d:'M30 36 L40 10',color:green},{d:'M40 10 L50 36',color:red},{d:'M50 36 L72 36',color:red}],
+    'Long Straddle':[{d:'M8 36 L40 10',color:green},{d:'M40 10 L72 36',color:green}],
+    'Long Strangle':[{d:'M8 36 L28 36',color:red},{d:'M28 36 L40 16',color:green},{d:'M40 16 L52 36',color:red},{d:'M52 36 L72 36',color:red}],
+  }
+  return map[name] || [{d:'M8 34 L35 34 L72 15',color:green}]
+}
+
+function cloneLegs(legs:StrategyLeg[]){return legs.map(leg=>({...leg}))}
+function strategyPayoff(legs:StrategyLeg[],spot:number,lotSize:number){return legs.reduce((total,leg)=>{const intrinsic=optionIntrinsic(leg,spot);const one=leg.action==='BUY'?intrinsic-leg.price:leg.price-intrinsic;return total+one*lotSize*(leg.lots||1)},0)}
+function optionIntrinsic(leg:StrategyLeg,spot:number){return leg.type==='CE'?Math.max(spot-leg.strike,0):Math.max(leg.strike-spot,0)}
+function buildStrategyPayoff(report:StrategyReport,legs:StrategyLeg[]){
+  const spot=report.spot, p=report.prediction
+  const band=p ? Math.abs(p.expected_upper_range-p.expected_lower_range)/2 : spot*.012
+  const vixBand=spot*((p?.india_vix||14)/100/Math.sqrt(365))
+  const sd=Math.max(band,vixBand,spot*.006)
+  const low=Math.max(1,spot-3*sd), high=spot+3*sd
+  const points=Array.from({length:121},(_,i)=>{const x=low+(high-low)*i/120;const expiryPl=strategyPayoff(legs,x,report.lot_size);return {spot:x,expiry_pl:expiryPl,target_pl:expiryPl*.65,expected_lower:p?.expected_lower_range,expected_upper:p?.expected_upper_range,current_spot:spot}})
+  return {points}
+}
+function summarizeStrategy(report:StrategyReport,selected:StrategyCandidate,legs:StrategyLeg[],payoff:{points:any[]}){
+  const vals=payoff.points.map(p=>p.expiry_pl)
+  const maxProfit=Math.max(...vals), maxLoss=Math.abs(Math.min(...vals))
+  const target=report.spot*(1+(report.prediction?.expected_return||0))
+  const expectedProfit=nearestPoint(payoff.points,target)?.target_pl ?? selected.expected_profit
+  const probabilityProfit=vals.filter(v=>v>0).length/Math.max(vals.length,1)
+  const premium=legs.reduce((sum,leg)=>sum+(leg.action==='SELL'?1:-1)*leg.price*report.lot_size*(leg.lots||1),0)
+  const breakevens=breakevensFromPoints(payoff.points)
+  return {maxProfit,maxLoss,expectedProfit,probabilityProfit,premium,breakevens,riskReward:maxLoss?maxProfit/maxLoss:0,margin:maxLoss+Math.max(0,-premium)}
+}
+function breakevensFromPoints(points:any[]){const out:number[]=[];for(let i=1;i<points.length;i++){const a=points[i-1],b=points[i];if(a.expiry_pl===0)out.push(a.spot);else if(a.expiry_pl*b.expiry_pl<0)out.push(a.spot+(0-a.expiry_pl)*(b.spot-a.spot)/(b.expiry_pl-a.expiry_pl))}return out.slice(0,4)}
+function nearestPoint(points:any[],spot:number){return points.reduce((best,item)=>Math.abs(item.spot-spot)<Math.abs(best.spot-spot)?item:best,points[0])}
+function attachOiBars(points:any[],bars:StrategyReport['oi_bars']){const enriched=points.map(p=>({...p,call_oi_lakh:0,put_oi_lakh:0}));(bars||[]).forEach(bar=>{let idx=0;for(let i=1;i<enriched.length;i++)if(Math.abs(enriched[i].spot-bar.strike)<Math.abs(enriched[idx].spot-bar.strike))idx=i;enriched[idx].call_oi_lakh=bar.call_oi_lakh;enriched[idx].put_oi_lakh=bar.put_oi_lakh});return enriched}
+function marketPrice(report:StrategyReport,leg:StrategyLeg){const row=report.option_chain?.find(item=>Math.abs(item.strike-leg.strike)<1e-6);if(!row)return null;return leg.type==='CE'?row.ce_ltp:row.pe_ltp}
+function strikeStepFromChain(chain:StrategyReport['option_chain']){const strikes=[...(chain||[]).map(x=>x.strike)].sort((a,b)=>a-b);const diffs=strikes.slice(1).map((x,i)=>x-strikes[i]).filter(x=>x>0);return diffs.length?Math.min(...diffs):50}
+function nearestStrike(spot:number,chain:StrategyReport['option_chain']){const strikes=(chain||[]).map(x=>x.strike);return strikes.length?strikes.reduce((a,b)=>Math.abs(b-spot)<Math.abs(a-spot)?b:a,strikes[0]):spot}
+function oiTotal(bars:StrategyReport['oi_bars'],key:'call_oi'|'put_oi'){const total=(bars||[]).reduce((a,b)=>a+Number(b[key]||0),0);return total>=10000000?`${(total/10000000).toFixed(2)}Cr`:`${(total/100000).toFixed(2)}L`}
+function expiryLabel(expiry:string,options?:{expiry:string;label:string}[]){return options?.find(x=>x.expiry===expiry)?.label?.replace(/\s+\(.+\)/,'') || expiry}
+
+function StrategyTomorrowOld() {
+  const [report,setReport]=useState<StrategyReport|null>(null)
   const [error,setError]=useState('')
   useEffect(()=>{api<StrategyReport>('/api/strategy/tomorrow').then(setReport).catch(e=>setError((e as Error).message))},[])
   if (error) return <div className="panel"><Empty text={error}/></div>
@@ -212,7 +439,7 @@ function StrategyTomorrow() {
   </>
 }
 
-function StrategyMini({name,active}:{name:string;active:boolean}) {
+function StrategyMiniOld({name,active}:{name:string;active:boolean}) {
   const isBear=name.toLowerCase().includes('bear'), isVol=name.toLowerCase().includes('straddle')||name.toLowerCase().includes('strangle')
   return <div className={active?'strategy-mini active':'strategy-mini'}><svg viewBox="0 0 80 48"><path d={isVol?'M8 34 L25 34 L40 12 L55 34 L72 34':isBear?'M8 12 L34 32 L72 32':'M8 34 L34 34 L72 12'} fill="none" stroke={isBear?'#f06a69':'#16a36f'} strokeWidth="3"/><path d="M8 34 H72" stroke="#b8c7c3" strokeDasharray="4 4"/></svg><span>{name}</span></div>
 }

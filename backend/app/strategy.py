@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from math import erf, exp, isfinite, sqrt
 from typing import Any
 
@@ -23,7 +24,7 @@ class Leg:
     price: float
 
 
-def strategy_report(db: Session) -> dict:
+def strategy_report(db: Session, expiry: date | None = None) -> dict:
     prediction = db.scalar(select(Prediction).order_by(Prediction.created_at.desc()))
     if not prediction:
         return {"status": "unavailable", "warning": "No prediction available. Run the pipeline first."}
@@ -31,7 +32,8 @@ def strategy_report(db: Session) -> dict:
     if not latest_date:
         return {"status": "unavailable", "warning": "No options EOD chain available. Fetch data or upload options CSV first."}
     rows = db.scalars(select(OptionEOD).where(OptionEOD.date == latest_date).order_by(OptionEOD.expiry, OptionEOD.strike)).all()
-    chain = _nearest_expiry_chain(rows, prediction.date)
+    expiry_options = _expiry_options(rows, prediction.date)
+    chain = _nearest_expiry_chain(rows, prediction.date, expiry)
     if len(chain) < 4:
         return {"status": "unavailable", "warning": "Not enough option strikes to rank defined-risk strategies."}
 
@@ -45,15 +47,18 @@ def strategy_report(db: Session) -> dict:
         "date": prediction.date.isoformat(),
         "next_trading_day": prediction.next_trading_day.isoformat(),
         "expiry": chain[0]["expiry"].isoformat(),
+        "expiries": expiry_options,
         "lot_size": LOT_SIZE,
         "selected": selected,
         "candidates": candidates[:8],
+        "option_chain": _option_chain_payload(chain),
+        "oi_bars": _oi_bars(chain),
         "payoff_points": _payoff_points(selected, prediction) if selected else [],
-        "history": strategy_history(db, limit=18),
+        "history": strategy_history(db, limit=14),
     }
 
 
-def strategy_history(db: Session, limit: int = 18) -> list[dict]:
+def strategy_history(db: Session, limit: int = 14) -> list[dict]:
     rows = db.scalars(select(Prediction).order_by(Prediction.date.desc()).limit(limit * 3)).all()
     output = []
     for row in rows:
@@ -67,9 +72,23 @@ def strategy_history(db: Session, limit: int = 18) -> list[dict]:
     return output
 
 
-def _nearest_expiry_chain(rows: list[OptionEOD], prediction_date) -> list[dict]:
+def _expiry_options(rows: list[OptionEOD], prediction_date) -> list[dict]:
     valid_expiries = sorted({row.expiry for row in rows if row.expiry >= prediction_date})
-    expiry = valid_expiries[0] if valid_expiries else sorted({row.expiry for row in rows})[0]
+    if not valid_expiries:
+        valid_expiries = sorted({row.expiry for row in rows})
+    options = []
+    for item in valid_expiries:
+        days = max((item - prediction_date).days, 0)
+        suffix = "Day" if days == 1 else "Days"
+        options.append({"expiry": item.isoformat(), "label": f"{item:%d %b} ({days} {suffix})", "days": days})
+    return options
+
+
+def _nearest_expiry_chain(rows: list[OptionEOD], prediction_date, selected_expiry: date | None = None) -> list[dict]:
+    valid_expiries = sorted({row.expiry for row in rows if row.expiry >= prediction_date})
+    if not valid_expiries:
+        valid_expiries = sorted({row.expiry for row in rows})
+    expiry = selected_expiry if selected_expiry in valid_expiries else valid_expiries[0]
     chain = []
     for row in rows:
         if row.expiry != expiry:
@@ -89,6 +108,28 @@ def _nearest_expiry_chain(rows: list[OptionEOD], prediction_date) -> list[dict]:
             "pe_oi": float(row.pe_oi or 0),
         })
     return sorted(chain, key=lambda item: item["strike"])
+
+
+def _option_chain_payload(chain: list[dict]) -> list[dict]:
+    return [{
+        "expiry": item["expiry"].isoformat(),
+        "strike": item["strike"],
+        "ce_ltp": item["ce_ltp"],
+        "pe_ltp": item["pe_ltp"],
+        "ce_oi": item["ce_oi"],
+        "pe_oi": item["pe_oi"],
+        "spot": item["spot"],
+    } for item in chain]
+
+
+def _oi_bars(chain: list[dict]) -> list[dict]:
+    return [{
+        "strike": item["strike"],
+        "call_oi": item["ce_oi"],
+        "put_oi": item["pe_oi"],
+        "call_oi_lakh": item["ce_oi"] / 100000,
+        "put_oi_lakh": item["pe_oi"] / 100000,
+    } for item in chain if item["ce_oi"] or item["pe_oi"]]
 
 
 def _rank_candidates(prediction: Prediction, chain: list[dict]) -> list[dict]:

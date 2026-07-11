@@ -43,7 +43,10 @@ export type StrategyCandidate = {
 export type StrategyReport = {
   status: string; warning?: string; disclaimer?: string; prediction?: Prediction; spot: number
   date: string; next_trading_day: string; expiry: string; lot_size: number
+  expiries?: { expiry: string; label: string; days: number }[]
   selected: StrategyCandidate; candidates: StrategyCandidate[]
+  option_chain?: { expiry: string; strike: number; ce_ltp: number; pe_ltp: number; ce_oi: number; pe_oi: number; spot: number }[]
+  oi_bars?: { strike: number; call_oi: number; put_oi: number; call_oi_lakh: number; put_oi_lakh: number }[]
   payoff_points: { spot: number; expiry_pl: number; target_pl: number; expected_lower: number; expected_upper: number; current_spot: number }[]
   history: { date: string; next_trading_day: string; strategy: string; probability_up: number; entry_close: number; exit_close: number; nifty_return: number; estimated_pl: number; outcome: string; method: string }[]
 }
