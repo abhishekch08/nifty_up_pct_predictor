@@ -30,3 +30,14 @@ table{font-size:11px!important}th{font-size:9px!important}.strategy-mini span{fo
 html[data-theme='light'] .step-input input{background:#fff!important;color:#1c2b33!important}
 @media(max-width:1280px){.strategy-builder{grid-template-columns:1fr!important}}
 @media(max-width:760px){.legs-table.editable .legs-head,.legs-table.editable .leg-row{grid-template-columns:26px 56px 1fr 1.2fr!important}.ticket-actions{justify-content:flex-start!important}}
+
+/* Strategy layout containment: prevent the editable ticket from spilling into the payoff panel. */
+.strategy-builder{grid-template-columns:minmax(740px,.95fr) minmax(0,1.15fr)!important;align-items:start!important}
+.strategy-left,.strategy-right,.strategy-ticket,.payoff-panel{min-width:0!important;max-width:100%!important}
+.legs-table.editable{overflow-x:auto!important;overflow-y:hidden!important;max-width:100%!important;scrollbar-color:#31504a #0a1412}
+.legs-table.editable .legs-head,.legs-table.editable .leg-row{min-width:690px!important;grid-template-columns:28px 64px 104px 170px 86px 72px 100px!important}
+.legs-table.editable input,.legs-table.editable select{max-width:100%!important}
+.step-input input{min-width:0!important}
+.sensi-summary{min-width:0!important}
+@media(max-width:1760px){.strategy-builder{grid-template-columns:1fr!important}.strategy-topbar{grid-template-columns:1fr 170px!important}.strategy-right{margin-top:0!important}}
+@media(max-width:900px){.strategy-topbar{grid-template-columns:1fr!important}.legs-table.editable .legs-head,.legs-table.editable .leg-row{min-width:670px!important;grid-template-columns:26px 60px 98px 160px 78px 68px 94px!important}.ticket-actions{justify-content:flex-start!important;flex-wrap:wrap!important}.content{padding-left:16px!important;padding-right:16px!important}}
