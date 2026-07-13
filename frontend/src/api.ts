@@ -33,6 +33,11 @@ export type Backtest = {
   threshold_analysis: { threshold: number; trades: number; hit_rate: number; total_return: number }[]
 }
 
+export type RecentCalibrationPoint = {
+  date: string; next_trading_day: string; predicted_return: number; actual_return: number
+  predicted_percent: number; actual_percent: number; nifty_close: number; next_close: number
+}
+
 export type StrategyLeg = { action: 'BUY' | 'SELL'; type: 'CE' | 'PE'; strike: number; price: number; expiry: string; lots: number }
 export type StrategyCandidate = {
   name: string; family: string; legs: StrategyLeg[]; premium: number; premium_label: string

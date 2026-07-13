@@ -11,8 +11,10 @@ from .database import get_db
 from .data_sources import SYMBOLS
 from .models import (BacktestResult, DataQualityLog, EventFlag, FlowDaily,
                      MarketDaily, ModelVersion, ParticipantOI, Prediction)
-from .services import (deploy_model, fetch_market_data, generate_prediction,
-                       parse_upload, retrain, serialize_prediction)
+from .ml import load_model
+from .services import (assembled_features, deploy_model, fetch_market_data,
+                       generate_prediction, parse_upload, retrain,
+                       serialize_prediction)
 from .strategy import strategy_history, strategy_report
 
 router = APIRouter(prefix="/api")
@@ -138,6 +140,71 @@ def calibration_latest(db: Session = Depends(get_db)) -> dict:
             "log_loss": row.metrics.get("log_loss"), "buckets": row.calibration, "warning": warning}
 
 
+@router.get("/calibration/recent")
+def calibration_recent(limit: int = Query(default=7, ge=1, le=30), db: Session = Depends(get_db)) -> list[dict]:
+    limit_value = int(limit) if isinstance(limit, int) else 7
+    rows = db.scalars(select(Prediction).order_by(Prediction.date.desc(), Prediction.created_at.desc()).limit(limit_value * 8)).all()
+    live_by_date: dict[date, Prediction] = {}
+    for row in rows:
+        if row.date in live_by_date:
+            continue
+        next_close = db.scalar(select(MarketDaily.close).where(
+            MarketDaily.symbol == SYMBOLS["NIFTY"], MarketDaily.date == row.next_trading_day))
+        if next_close is None:
+            continue
+        live_by_date[row.date] = row
+
+    output: list[dict] = []
+    try:
+        model = db.scalar(select(ModelVersion).where(ModelVersion.status == "deployed").order_by(ModelVersion.created_at.desc()))
+        if not model:
+            raise ValueError("No deployed model")
+        artifact = load_model(model.artifact_path)
+        frame = assembled_features(db).sort_values("date").copy()
+        frame["next_trading_day"] = frame["date"].shift(-1)
+        clean = frame.dropna(subset=["target_next_day_return", "next_trading_day"]).tail(limit_value)
+        expected_returns = artifact["regressor"].predict(clean[artifact["features"]]) if len(clean) else []
+        for (_, item), expected_return in zip(clean.iterrows(), expected_returns):
+            day = item["date"]
+            if hasattr(day, "date"):
+                day = day.date()
+            next_day = item["next_trading_day"]
+            if hasattr(next_day, "date"):
+                next_day = next_day.date()
+            live = live_by_date.get(day)
+            predicted_return = live.expected_return if live else float(expected_return)
+            nifty_close = live.nifty_close if live else float(item["close"])
+            actual_return = float(item["target_next_day_return"])
+            output.append({
+                "date": day.isoformat(),
+                "next_trading_day": next_day.isoformat(),
+                "predicted_return": predicted_return,
+                "actual_return": actual_return,
+                "predicted_percent": predicted_return * 100,
+                "actual_percent": actual_return * 100,
+                "nifty_close": nifty_close,
+                "next_close": nifty_close * (1 + actual_return),
+            })
+    except Exception:
+        for row in live_by_date.values():
+            next_close = db.scalar(select(MarketDaily.close).where(
+                MarketDaily.symbol == SYMBOLS["NIFTY"], MarketDaily.date == row.next_trading_day))
+            if next_close is None:
+                continue
+            actual_return = float(next_close) / float(row.nifty_close) - 1
+            output.append({
+                "date": row.date.isoformat(),
+                "next_trading_day": row.next_trading_day.isoformat(),
+                "predicted_return": row.expected_return,
+                "actual_return": actual_return,
+                "predicted_percent": row.expected_return * 100,
+                "actual_percent": actual_return * 100,
+                "nifty_close": row.nifty_close,
+                "next_close": float(next_close),
+            })
+    return output[-limit_value:]
+
+
 @router.get("/models")
 def models(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(ModelVersion).order_by(ModelVersion.created_at.desc())).all()
@@ -205,17 +272,23 @@ def _price_curve(row: BacktestResult, db: Session) -> list[dict]:
     market_rows = db.scalars(select(MarketDaily).where(
         MarketDaily.symbol == SYMBOLS["NIFTY"], MarketDaily.date.in_(dates))).all()
     closes = {r.date.isoformat(): r.close for r in market_rows}
-    first_equity = row.equity_curve[0].get("equity") or 1
-    first_close = closes.get(row.equity_curve[0].get("date"))
-    if not first_close:
-        return []
-    output = []
+    entries = []
     for item in row.equity_curve:
         day = item.get("date")
         close = closes.get(day)
         equity = item.get("equity")
-        if close is None or equity is None:
-            continue
-        output.append({"date": day, "nifty_close": close,
-                       "model_strategy_close": first_close * float(equity) / float(first_equity)})
+        if close is not None and equity is not None:
+            entries.append({"date": day, "close": float(close), "equity": float(equity)})
+    if not entries:
+        return []
+    first_equity = entries[0]["equity"] or 1
+    first_close = entries[0]["close"]
+    last_equity_norm = entries[-1]["equity"] / first_equity - 1
+    price_span = entries[-1]["close"] - first_close
+    scale = price_span / last_equity_norm if abs(last_equity_norm) > 1e-9 else 0
+    output = []
+    for item in entries:
+        model_norm = first_close + (item["equity"] / first_equity - 1) * scale
+        output.append({"date": item["date"], "nifty_close": item["close"],
+                       "model_strategy_close": model_norm})
     return output

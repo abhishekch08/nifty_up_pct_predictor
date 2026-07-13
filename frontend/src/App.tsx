@@ -5,7 +5,7 @@ import { Activity, AlertTriangle, AreaChart, ArrowDownRight, ArrowUpRight, BarCh
   Moon, Settings, ShieldCheck, SlidersHorizontal, Sun, Upload, X } from 'lucide-react'
 import { Area, AreaChart as ReArea, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, LineChart,
   ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { api, Backtest, Factor, Prediction, StrategyCandidate, StrategyLeg, StrategyReport } from './api'
+import { api, Backtest, Factor, Prediction, RecentCalibrationPoint, StrategyCandidate, StrategyLeg, StrategyReport } from './api'
 
 type Page = 'overview' | 'strategy' | 'flows' | 'derivatives' | 'options' | 'backtest' | 'calibration' | 'models' | 'methodology' | 'admin'
 
@@ -35,6 +35,7 @@ function App() {
   const [mobile, setMobile] = useState(false)
   const [prediction, setPrediction] = useState<Prediction>(sample)
   const [backtest, setBacktest] = useState<Backtest | null>(null)
+  const [recentCalibration, setRecentCalibration] = useState<RecentCalibrationPoint[]>([])
   const [models, setModels] = useState<any[]>([])
   const [dataStatus, setDataStatus] = useState<any>({ overall: 'unsafe', datasets: [] })
   const [notice, setNotice] = useState('')
@@ -43,15 +44,16 @@ function App() {
 
   const refresh = async () => {
     setLoading(true)
-    const [p, b, m, d] = await Promise.allSettled([
+    const [p, b, m, d, c] = await Promise.allSettled([
       api<Prediction>('/api/latest-prediction'), api<Backtest>('/api/backtest/latest'),
-      api<any[]>('/api/models'), api<any>('/api/data-status')
+      api<any[]>('/api/models'), api<any>('/api/data-status'), api<RecentCalibrationPoint[]>('/api/calibration/recent?limit=7')
     ])
     if (p.status === 'fulfilled') setPrediction(p.value)
     else setNotice('No deployed prediction yet. Use Admin to fetch data, train, and deploy an eligible model.')
     if (b.status === 'fulfilled') setBacktest(b.value)
     if (m.status === 'fulfilled') setModels(m.value)
     if (d.status === 'fulfilled') setDataStatus(d.value)
+    if (c.status === 'fulfilled') setRecentCalibration(c.value)
     setLoading(false)
   }
   useEffect(() => { refresh() }, [])
@@ -78,13 +80,13 @@ function App() {
       </div><div className="header-actions"><button className="icon-btn" onClick={()=>setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle light/dark mode">{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button><DataBadge status={prediction.data_quality}/><button className="icon-btn" onClick={refresh} title="Refresh"><RefreshCw className={loading ? 'spin' : ''} size={17}/></button></div></header>
       {notice && <div className="notice"><AlertTriangle size={16}/><span>{notice}</span><button onClick={() => setNotice('')}><X size={15}/></button></div>}
       <div className="content">
-        {page === 'overview' && <Overview prediction={prediction} backtest={backtest}/>} 
+        {page === 'overview' && <Overview prediction={prediction} backtest={backtest} recentCalibration={recentCalibration}/>}
         {page === 'strategy' && <StrategyTomorrow/>}
         {page === 'flows' && <Flows/>}
         {page === 'derivatives' && <Derivatives/>}
         {page === 'options' && <Options prediction={prediction}/>} 
         {page === 'backtest' && <BacktestPage data={backtest}/>} 
-        {page === 'calibration' && <Calibration data={backtest}/>} 
+        {page === 'calibration' && <Calibration data={backtest} recentCalibration={recentCalibration}/>}
         {page === 'models' && <Models rows={models}/>} 
         {page === 'methodology' && <MethodologyReport/>}
         {page === 'admin' && <Admin onDone={refresh} models={models}/>} 
@@ -93,7 +95,7 @@ function App() {
   </div>
 }
 
-function Overview({prediction:p, backtest}:{prediction:Prediction; backtest:Backtest|null}) {
+function Overview({prediction:p, backtest, recentCalibration}:{prediction:Prediction; backtest:Backtest|null; recentCalibration:RecentCalibrationPoint[]}) {
   return <>
     <section className="hero-grid">
       <div className="panel probability-panel">
@@ -123,8 +125,8 @@ function Overview({prediction:p, backtest}:{prediction:Prediction; backtest:Back
       <div className="panel"><PanelTitle label="Signal drivers" note="One-feature perturbation attribution" help="Explains today's forecast locally. For each feature, the app removes that feature from the latest row and measures how much the probability changes; positive impacts are bullish drivers, negative impacts are bearish drivers."/><div className="factor-columns">
         <FactorList title="BULLISH" factors={p.top_bullish_factors} kind="up"/><FactorList title="BEARISH" factors={p.top_bearish_factors} kind="down"/>
       </div></div>
-      <div className="panel"><PanelTitle label="Calibration snapshot" note="Predicted probability vs observed hit rate" help="Reliability check for the probability scale. If predictions around 60% actually win close to 60% of the time, the model is calibrated; large gaps mean the probability should be treated with more caution."/>
-        {backtest?.calibration?.length ? <ResponsiveContainer width="100%" height={230}><LineChart data={backtest.calibration}><CartesianGrid stroke="#1b302c" vertical={false}/><XAxis dataKey="predicted" tickFormatter={(v)=>pct(v)} stroke="#66807a"/><YAxis domain={[0,1]} tickFormatter={(v)=>pct(v)} stroke="#66807a"/><Tooltip contentStyle={tip}/><Line dataKey="actual" stroke="#51e6a6" strokeWidth={2} dot={{fill:'#51e6a6'}}/><Line dataKey="predicted" stroke="#516761" strokeDasharray="5 5" dot={false}/></LineChart></ResponsiveContainer> : <Empty text="Calibration appears after the first backtest."/>}
+      <div className="panel"><PanelTitle label="Calibration snapshot" note="Predicted return % vs actual Nifty return %" help="Last available trading-day replay. The predicted line is the model's expected-return percentage shown in Market Regime; the actual line is the next-session Nifty close-to-close percentage."/>
+        <RecentReturnCalibrationChart data={recentCalibration} height={230}/>
       </div>
     </section>
     <Disclaimer/>
@@ -160,6 +162,19 @@ function Options({prediction:p}:{prediction:Prediction}) {
   </div><div className="panel"><PanelTitle label="Options-chain analytics" note="Official NSE EOD bhavcopy" help="Summarizes the nearest valid Nifty options expiry from the official end-of-day bhavcopy. PCR, call wall and put wall reveal where open interest is concentrated, which can mark hedging pressure or crowded strike zones." />{chain && chain.status !== 'unavailable' ? <div className="calc-results"><div><span>PCR BY OI</span><b>{chain.pcr_oi?.toFixed(2) ?? '—'}</b></div><div><span>SPOT</span><b>{num(chain.spot)}</b></div><div><span>CALL WALL</span><b>{num(chain.call_wall)}</b></div><div><span>PUT WALL</span><b>{num(chain.put_wall)}</b></div><div><span>TOTAL CALL OI</span><b>{num(chain.total_call_oi)}</b></div><div><span>TOTAL PUT OI</span><b>{num(chain.total_put_oi)}</b></div></div> : <Empty text="Official NSE options EOD data has not been published yet. Restart later or use the CSV fallback."/>}</div></section>
 }
 
+function RecentReturnCalibrationChart({data,height}:{data:RecentCalibrationPoint[];height:number}) {
+  if (!data.length) return <Empty text="Recent return calibration appears after completed predictions have actual next-session closes."/>
+  return <ResponsiveContainer width="100%" height={height}><LineChart data={data}>
+    <CartesianGrid stroke="#1b302c" vertical={false}/>
+    <XAxis dataKey="next_trading_day" tickFormatter={shortDate} stroke="#66807a" minTickGap={18}/>
+    <YAxis tickFormatter={(v)=>`${Number(v).toFixed(1)}%`} stroke="#66807a"/>
+    <Tooltip contentStyle={tip} labelFormatter={(v)=>`Trading day ${v}`} formatter={(v:any,name:any)=>[`${Number(v).toFixed(2)}%`, name === 'predicted_percent' ? 'Predicted expected return' : 'Actual Nifty return']}/>
+    <ReferenceLine y={0} stroke="#829992"/>
+    <Line dataKey="predicted_percent" name="Predicted expected return" stroke="#8fb5ff" strokeWidth={2.4} dot={{fill:'#8fb5ff',r:4}}/>
+    <Line dataKey="actual_percent" name="Actual Nifty return" stroke="#51e6a6" strokeWidth={2.4} dot={{fill:'#51e6a6',r:4}}/>
+  </LineChart></ResponsiveContainer>
+}
+
 function StrategyTomorrow() {
   const [report,setReport]=useState<StrategyReport|null>(null)
   const [expiry,setExpiry]=useState('')
@@ -185,6 +200,10 @@ function StrategyTomorrow() {
   if (error) return <div className="panel"><Empty text={error}/></div>
   if (!report) return <div className="panel"><Empty text="Ranking capped-risk strategies from the latest model forecast and option chain…"/></div>
   if (report.status !== 'complete') return <div className="panel"><Empty text={report.warning || 'Strategy engine is waiting for prediction and options-chain data.'}/></div>
+  const recommended=report.selected
+  const recommendedLegs=cloneLegs(recommended.legs)
+  const recommendedPayoff=buildStrategyPayoff(report, recommendedLegs)
+  const recommendedSummary=summarizeStrategy(report, recommended, recommendedLegs, recommendedPayoff)
   const selected=report.candidates.find(c=>c.name===selectedName)||report.selected
   const activeLegs=legs.length ? legs : cloneLegs(selected.legs)
   const payoff=buildStrategyPayoff(report, activeLegs)
@@ -252,7 +271,7 @@ function StrategyTomorrow() {
           <div><span>Funds & Margins</span><b>{money(summary.margin)}</b></div>
         </div>
         <div className="panel payoff-panel sensi-card">
-          <PanelTitle label="Suggested strategy payoff" note={`${selected.name} · ${expiryOptions.find(x=>x.expiry===expiry)?.label || report.expiry}`} help="Sensibull-style payoff workspace for the current suggested/edited strategy. Green/red bars are open-interest concentration from the stored Nifty options chain; payoff lines update with the selected expiry, strikes, option type, lot count and entry prices."/>
+          <PanelTitle label="Strategy payoff workspace" note={`${selected.name} · ${expiryOptions.find(x=>x.expiry===expiry)?.label || report.expiry}`} help="Sensibull-style payoff workspace for the strategy currently loaded in the ticket. The fixed recommendation below stays locked to the engine's best strategy; this workspace lets you inspect alternatives without rewriting the recommendation."/>
           <div className="payoff-tabs">
             {(['graph','pl','greeks','chart'] as const).map(item=><button className={tab===item?'active':''} onClick={()=>setTab(item)} key={item}>{item==='graph'?'Payoff Graph':item==='pl'?'P&L Table':item==='greeks'?'Greeks':'Strategy Chart'}</button>)}
             <label className="booked-toggle"><input type="checkbox" checked readOnly/> Add Booked P&L</label>
@@ -272,18 +291,18 @@ function StrategyTomorrow() {
       <div className="panel strategy-metrics">
         <PanelTitle label="Why this strategy won" note="Reward, risk, probability and expected value" help="The chosen strategy is the highest ranked capped-loss candidate after combining expected P/L per lot, probability of profit, reward/risk and directional alignment with the model forecast."/>
         <div className="strategy-kpis">
-          <div><span>Max profit</span><b className="green">{money(summary.maxProfit)}</b></div>
-          <div><span>Max loss</span><b className="red">{money(-summary.maxLoss)}</b></div>
-          <div><span>Reward / risk</span><b>{summary.riskReward ? `${summary.riskReward.toFixed(2)}x` : '—'}</b></div>
-          <div><span>Probability profit</span><b>{pct(summary.probabilityProfit)}</b></div>
-          <div><span>Expected P/L</span><b className={summary.expectedProfit>=0?'green':'red'}>{money(summary.expectedProfit)}</b></div>
-          <div><span>{summary.premium>=0?'Credit received':'Debit paid'}</span><b>{money(Math.abs(summary.premium))}</b></div>
+          <div><span>Max profit</span><b className="green">{money(recommendedSummary.maxProfit)}</b></div>
+          <div><span>Max loss</span><b className="red">{money(-recommendedSummary.maxLoss)}</b></div>
+          <div><span>Reward / risk</span><b>{recommendedSummary.riskReward ? `${recommendedSummary.riskReward.toFixed(2)}x` : '—'}</b></div>
+          <div><span>Probability profit</span><b>{pct(recommendedSummary.probabilityProfit)}</b></div>
+          <div><span>Expected P/L</span><b className={recommendedSummary.expectedProfit>=0?'green':'red'}>{money(recommendedSummary.expectedProfit)}</b></div>
+          <div><span>{recommendedSummary.premium>=0?'Credit received':'Debit paid'}</span><b>{money(Math.abs(recommendedSummary.premium))}</b></div>
         </div>
-        <div className="rationale"><b>Reasoning</b><p>{selected.rationale}</p><p>{selected.interpretation}</p><p>Breakeven: {summary.breakevens.length?summary.breakevens.map(num).join(', '):'Not inside displayed range'}.</p>{loading&&<p>Refreshing expiry data…</p>}</div>
+        <div className="rationale"><b>Reasoning</b><p>{recommended.rationale}</p><p>{recommended.interpretation}</p><p>Breakeven: {recommendedSummary.breakevens.length?recommendedSummary.breakevens.map(num).join(', '):'Not inside displayed range'}.</p>{loading&&<p>Refreshing expiry data…</p>}</div>
       </div>
       <div className="panel selected-strategy">
-        <div><span>Selected strategy</span><h2>{selected.name}</h2><p>{selected.interpretation}</p></div>
-        <div className={`strategy-chip ${selected.family.toLowerCase()}`}>{selected.family}</div>
+        <div><span>Best strategy for tomorrow</span><h2>{recommended.name}</h2><p>{recommended.interpretation}</p></div>
+        <div className={`strategy-chip ${recommended.family.toLowerCase()}`}>{recommended.family}</div>
       </div>
     </section>
     <section className="two-col">
@@ -296,8 +315,8 @@ function StrategyTomorrow() {
 
 function StrategyPayoffGraph({data,report,selected,summary}:{data:any[];report:StrategyReport;selected:StrategyCandidate;summary:any}) {
   return <div className="strategy-chart-wrap">
-    <div className="oi-legend"><span>OI data at {num(nearestStrike(report.spot, report.option_chain))}</span><i className="call"/> Call OI <b>{oiTotal(report.oi_bars,'call_oi')}</b><i className="put"/> Put OI <b>{oiTotal(report.oi_bars,'put_oi')}</b><em>— On Expiry</em><em className="blue">— On Target Date</em></div>
-    <ResponsiveContainer width="100%" height={390}><ComposedChart data={data}><CartesianGrid stroke="#d9e1df22" vertical={false}/><XAxis dataKey="spot" tickFormatter={num} stroke="#66807a"/><YAxis yAxisId="pl" tickFormatter={moneyShort} stroke="#66807a" label={{value:'Profit / loss',angle:-90,position:'insideLeft'}}/><YAxis yAxisId="oi" orientation="right" tickFormatter={(v)=>`${Number(v).toFixed(0)}L`} stroke="#66807a" label={{value:'Open Interest',angle:90,position:'insideRight'}}/><Tooltip content={<StrategyTooltip/>}/><ReferenceLine yAxisId="pl" y={0} stroke="#829992"/><ReferenceLine yAxisId="pl" x={report.spot} stroke="#dce9e5" label="Current price"/><ReferenceLine yAxisId="pl" x={report.prediction?.expected_lower_range} stroke="#f06a69" strokeDasharray="4 4" label="-1SD"/><ReferenceLine yAxisId="pl" x={report.prediction?.expected_upper_range} stroke="#51e6a6" strokeDasharray="4 4" label="1SD"/><Bar yAxisId="oi" dataKey="put_oi_lakh" name="Put OI" fill="#a7eab2" opacity={0.45}/><Bar yAxisId="oi" dataKey="call_oi_lakh" name="Call OI" fill="#f3a6a2" opacity={0.45}/><Line yAxisId="pl" dataKey="expiry_pl" name="On Expiry" stroke="#16a36f" strokeWidth={2.4} dot={false}/><Line yAxisId="pl" dataKey="target_pl" name="On Target Date" stroke="#0b75df" strokeWidth={2.4} dot={false}/></ComposedChart></ResponsiveContainer>
+    <div className="oi-legend"><span>OI data at {num(nearestStrike(report.spot, report.option_chain))}</span><i className="call"/> Call OI <b>{oiTotal(report.oi_bars,'call_oi')}</b><i className="put"/> Put OI <b>{oiTotal(report.oi_bars,'put_oi')}</b><em>Green = profit</em><em className="loss">Red = loss</em></div>
+    <ResponsiveContainer width="100%" height={390}><ComposedChart data={data}><CartesianGrid stroke="#d9e1df22" vertical={false}/><XAxis dataKey="spot" tickFormatter={num} stroke="#66807a"/><YAxis yAxisId="pl" tickFormatter={moneyShort} stroke="#66807a" label={{value:'Profit / loss',angle:-90,position:'insideLeft'}}/><YAxis yAxisId="oi" orientation="right" tickFormatter={(v)=>`${Number(v).toFixed(0)}L`} stroke="#66807a" label={{value:'Open Interest',angle:90,position:'insideRight'}}/><Tooltip content={<StrategyTooltip/>}/><ReferenceLine yAxisId="pl" y={0} stroke="#829992"/><ReferenceLine yAxisId="pl" x={report.spot} stroke="#dce9e5" label="Current price"/><ReferenceLine yAxisId="pl" x={report.prediction?.expected_lower_range} stroke="#f06a69" strokeDasharray="4 4" label="-1SD"/><ReferenceLine yAxisId="pl" x={report.prediction?.expected_upper_range} stroke="#51e6a6" strokeDasharray="4 4" label="1SD"/><Bar yAxisId="oi" dataKey="put_oi_lakh" name="Put OI" fill="#a7eab2" opacity={0.45}/><Bar yAxisId="oi" dataKey="call_oi_lakh" name="Call OI" fill="#f3a6a2" opacity={0.45}/><Line yAxisId="pl" dataKey="expiry_profit" name="Expiry profit" stroke="#16a36f" strokeWidth={2.5} dot={false} connectNulls={false}/><Line yAxisId="pl" dataKey="expiry_loss" name="Expiry loss" stroke="#f06a69" strokeWidth={2.5} dot={false} connectNulls={false}/><Line yAxisId="pl" dataKey="target_profit" name="Target-day profit" stroke="#4dd7a2" strokeDasharray="5 4" strokeWidth={2.1} dot={false} connectNulls={false}/><Line yAxisId="pl" dataKey="target_loss" name="Target-day loss" stroke="#ff9d9d" strokeDasharray="5 4" strokeWidth={2.1} dot={false} connectNulls={false}/></ComposedChart></ResponsiveContainer>
     <div className="target-pill">Projected P/L at model target: {money(summary.expectedProfit)} · {selected.name}</div>
   </div>
 }
@@ -305,7 +324,7 @@ function StrategyPayoffGraph({data,report,selected,summary}:{data:any[];report:S
 function StrategyTooltip({active,payload,label}:any) {
   if(!active || !payload?.length) return null
   const row=payload[0]?.payload || {}
-  return <div className="strategy-tooltip"><span>When price is at</span><b>{num(Number(label))}</b><hr/><p>Expiry P/L <strong>{money(row.expiry_pl||0)}</strong></p><p>Target-day P/L <strong>{money(row.target_pl||0)}</strong></p>{(row.call_oi_lakh||row.put_oi_lakh) ? <p>OI bars <strong>CE {row.call_oi_lakh?.toFixed?.(1)||0}L · PE {row.put_oi_lakh?.toFixed?.(1)||0}L</strong></p> : null}</div>
+  return <div className="strategy-tooltip"><span>When price is at</span><b>{num(Number(label))}</b><hr/><p>Expiry P/L <strong className={(row.expiry_pl||0)>=0?'green':'red'}>{money(row.expiry_pl||0)}</strong></p><p>Target-day P/L <strong className={(row.target_pl||0)>=0?'green':'red'}>{money(row.target_pl||0)}</strong></p>{(row.call_oi_lakh||row.put_oi_lakh) ? <p>OI bars <strong>CE {row.call_oi_lakh?.toFixed?.(1)||0}L · PE {row.put_oi_lakh?.toFixed?.(1)||0}L</strong></p> : null}</div>
 }
 
 function StrategyPLTable({legs,report}:{legs:StrategyLeg[];report:StrategyReport}) {
@@ -333,7 +352,7 @@ function StrategyGreeks({legs,report}:{legs:StrategyLeg[];report:StrategyReport}
 }
 
 function StrategyPriceChart({data}:{data:any[]}) {
-  return <ResponsiveContainer width="100%" height={350}><LineChart data={data}><CartesianGrid stroke="#d9e1df22" vertical={false}/><XAxis dataKey="spot" tickFormatter={num} stroke="#66807a"/><YAxis tickFormatter={moneyShort} stroke="#66807a"/><Tooltip contentStyle={tip} formatter={(v:any)=>money(Number(v))}/><Line dataKey="target_pl" name="Strategy Price / Target P&L" stroke="#0b75df" strokeWidth={2} dot={false}/><Line dataKey="expiry_pl" name="Expiry P&L" stroke="#16a36f" strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer>
+  return <ResponsiveContainer width="100%" height={350}><LineChart data={data}><CartesianGrid stroke="#d9e1df22" vertical={false}/><XAxis dataKey="spot" tickFormatter={num} stroke="#66807a"/><YAxis tickFormatter={moneyShort} stroke="#66807a"/><Tooltip contentStyle={tip} formatter={(v:any)=>money(Number(v))}/><ReferenceLine y={0} stroke="#829992"/><Line dataKey="target_profit" name="Target-day profit" stroke="#4dd7a2" strokeDasharray="5 4" strokeWidth={2} dot={false}/><Line dataKey="target_loss" name="Target-day loss" stroke="#ff9d9d" strokeDasharray="5 4" strokeWidth={2} dot={false}/><Line dataKey="expiry_profit" name="Expiry profit" stroke="#16a36f" strokeWidth={2.2} dot={false}/><Line dataKey="expiry_loss" name="Expiry loss" stroke="#f06a69" strokeWidth={2.2} dot={false}/></LineChart></ResponsiveContainer>
 }
 
 function StrategyMini({name,active}:{name:string;active:boolean}) {
@@ -350,8 +369,8 @@ function strategyIconPaths(name:string) {
     'Bear Call Spread':[{d:'M8 22 L36 22',color:green},{d:'M36 22 L52 36',color:red},{d:'M52 36 L72 36',color:red}],
     'Iron Condor':[{d:'M8 36 L24 36',color:red},{d:'M24 36 L34 20',color:green},{d:'M34 20 L48 20',color:green},{d:'M48 20 L58 36',color:red},{d:'M58 36 L72 36',color:red}],
     'Iron Butterfly':[{d:'M8 36 L30 36',color:red},{d:'M30 36 L40 10',color:green},{d:'M40 10 L50 36',color:red},{d:'M50 36 L72 36',color:red}],
-    'Long Straddle':[{d:'M8 36 L40 10',color:green},{d:'M40 10 L72 36',color:green}],
-    'Long Strangle':[{d:'M8 36 L28 36',color:red},{d:'M28 36 L40 16',color:green},{d:'M40 16 L52 36',color:red},{d:'M52 36 L72 36',color:red}],
+    'Long Straddle':[{d:'M8 12 L40 36',color:green},{d:'M40 36 L72 12',color:green}],
+    'Long Strangle':[{d:'M8 12 L28 36',color:green},{d:'M28 36 L52 36',color:red},{d:'M52 36 L72 12',color:green}],
   }
   return map[name] || [{d:'M8 34 L35 34 L72 15',color:green}]
 }
@@ -365,7 +384,23 @@ function buildStrategyPayoff(report:StrategyReport,legs:StrategyLeg[]){
   const vixBand=spot*((p?.india_vix||14)/100/Math.sqrt(365))
   const sd=Math.max(band,vixBand,spot*.006)
   const low=Math.max(1,spot-3*sd), high=spot+3*sd
-  const points=Array.from({length:121},(_,i)=>{const x=low+(high-low)*i/120;const expiryPl=strategyPayoff(legs,x,report.lot_size);return {spot:x,expiry_pl:expiryPl,target_pl:expiryPl*.65,expected_lower:p?.expected_lower_range,expected_upper:p?.expected_upper_range,current_spot:spot}})
+  const points=Array.from({length:121},(_,i)=>{
+    const x=low+(high-low)*i/120
+    const expiryPl=strategyPayoff(legs,x,report.lot_size)
+    const targetPl=expiryPl*.65
+    return {
+      spot:x,
+      expiry_pl:expiryPl,
+      target_pl:targetPl,
+      expiry_profit:expiryPl>=0?expiryPl:null,
+      expiry_loss:expiryPl<0?expiryPl:null,
+      target_profit:targetPl>=0?targetPl:null,
+      target_loss:targetPl<0?targetPl:null,
+      expected_lower:p?.expected_lower_range,
+      expected_upper:p?.expected_upper_range,
+      current_spot:spot
+    }
+  })
   return {points}
 }
 function summarizeStrategy(report:StrategyReport,selected:StrategyCandidate,legs:StrategyLeg[],payoff:{points:any[]}){
@@ -447,15 +482,14 @@ function StrategyMiniOld({name,active}:{name:string;active:boolean}) {
 function BacktestPage({data}:{data:Backtest|null}) {
   return <>{!data ? <div className="panel"><Empty text="Run model training to generate a walk-forward backtest."/></div> : <>
     <section className="kpi-row"><Kpi label="Accuracy" value={pct(Number(data.metrics.accuracy))} sub="Out of sample" help="Share of walk-forward days where the model's probability crossed 50% in the correct direction. Useful but incomplete because it ignores confidence and probability calibration."/><Kpi label="Balanced accuracy" value={pct(Number(data.metrics.balanced_accuracy))} sub="Class adjusted" help="Average of up-day accuracy and down-day accuracy. This prevents the score from looking good merely because one class, such as up days, occurs more often."/><Kpi label="Return MAE" value={pct(Number(data.metrics.mae_return))} sub="Regression error" help="Mean absolute error of the expected-return model. This is used in the expected-range calculation as a cushion for typical forecast error."/><Kpi label="Log loss" value={Number(data.metrics.log_loss).toFixed(3)} sub="Probability penalty" help="Probability scoring metric that heavily penalizes confident wrong forecasts. Lower log loss means the model is less reckless with high-conviction predictions."/></section>
-    <section className="panel"><PanelTitle label="Nifty vs model strategy curve" note="Both curves normalized to Nifty price axis" help="The model strategy curve starts at the same Nifty price as the backtest and compounds the 55/45 signal returns after 3 bps costs. It is plotted against actual Nifty close on the same Y-axis, so relative performance is visually comparable in index points."/><ResponsiveContainer width="100%" height={360}><LineChart data={(data.price_curve?.length ? data.price_curve : data.equity_curve) as any[]}><CartesianGrid stroke="#1b302c" vertical={false}/><XAxis dataKey="date" hide/><YAxis stroke="#66807a" domain={['auto','auto']} tickFormatter={num}/><Tooltip contentStyle={tip} formatter={(v:any)=>num(Number(v))}/><Line dataKey="nifty_close" name="Actual Nifty 50" stroke="#8fb5ff" strokeWidth={2} dot={false}/><Line dataKey="model_strategy_close" name="Model strategy equivalent" stroke="#51e6a6" strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></section>
+    <section className="panel"><PanelTitle label="Nifty vs model strategy curve" note="Both curves normalized to Nifty price axis" help="The model strategy curve starts at the same Nifty price as the backtest and is scaled onto the Nifty price axis, so it no longer appears as a separate lakh-sized equity account. The x-axis is calendar time."/><ResponsiveContainer width="100%" height={380}><LineChart data={(data.price_curve?.length ? data.price_curve : data.equity_curve) as any[]}><CartesianGrid stroke="#1b302c" vertical={false}/><XAxis dataKey="date" tickFormatter={monthYear} stroke="#66807a" minTickGap={52}/><YAxis stroke="#66807a" domain={['auto','auto']} tickFormatter={num}/><Tooltip contentStyle={tip} labelFormatter={(v)=>`Date ${v}`} formatter={(v:any)=>num(Number(v))}/><Line dataKey="nifty_close" name="Actual Nifty 50" stroke="#8fb5ff" strokeWidth={2} dot={false}/><Line dataKey="model_strategy_close" name="Model strategy equivalent" stroke="#51e6a6" strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></section>
     <section className="panel table-panel"><PanelTitle label="Threshold analysis" note="Expected value after transaction costs" help="Compares different probability cutoffs. Higher thresholds trade less often but require stronger model confidence; the table shows trade count, hit rate and total out-of-sample return after the assumed cost."/><Table columns={['threshold','trades','hit_rate','total_return']} rows={data.threshold_analysis}/></section>
   </>}</>
 }
 
-function Calibration({data}:{data:Backtest|null}) {
-  const bars=data?.calibration||[]
-  return <><section className="kpi-row"><Kpi label="Brier score" value={data?Number(data.metrics.brier_score).toFixed(3):'—'} sub="Ideal approaches 0" help="Mean squared probability error. A lower Brier score means the probabilities are closer to realized 0/1 outcomes across the backtest."/><Kpi label="Log loss" value={data?Number(data.metrics.log_loss).toFixed(3):'—'} sub="Confidence penalty" help="Penalizes overconfidence. A wrong 90% probability is far worse than a wrong 55% probability, so log loss helps detect reckless probability estimates."/><Kpi label="Calibration method" value="Platt" sub="Time-series folds" help="Platt calibration fits a sigmoid layer on top of the logistic classifier so raw scores map to observed frequencies more realistically."/><Kpi label="Buckets" value={String(bars.length||'—')} sub="Reliability bins" help="Number of probability intervals with enough out-of-sample observations to compare predicted probability against actual hit rate."/></section>
-  <section className="panel"><PanelTitle label="Reliability by probability bucket" note="Observed frequency should track predicted probability" help="For each probability bucket, the dark bar is the model's average forecast and the green bar is the realized up-day frequency. Large gaps show underconfidence or overconfidence in that probability range." />{bars.length?<ResponsiveContainer width="100%" height={360}><BarChart data={bars}><CartesianGrid stroke="#1b302c" vertical={false}/><XAxis dataKey="bucket" stroke="#66807a"/><YAxis domain={[0,1]} tickFormatter={pct} stroke="#66807a"/><Tooltip contentStyle={tip}/><Bar dataKey="predicted" fill="#304842"/><Bar dataKey="actual" fill="#51e6a6"/></BarChart></ResponsiveContainer>:<Empty text="Calibration buckets appear after training."/>}</section></>
+function Calibration({data,recentCalibration}:{data:Backtest|null; recentCalibration:RecentCalibrationPoint[]}) {
+  return <><section className="kpi-row"><Kpi label="Brier score" value={data?Number(data.metrics.brier_score).toFixed(3):'—'} sub="Ideal approaches 0" help="Mean squared probability error. A lower Brier score means the probabilities are closer to realized 0/1 outcomes across the backtest."/><Kpi label="Log loss" value={data?Number(data.metrics.log_loss).toFixed(3):'—'} sub="Confidence penalty" help="Penalizes overconfidence. A wrong 90% probability is far worse than a wrong 55% probability, so log loss helps detect reckless probability estimates."/><Kpi label="Calibration method" value="Platt" sub="Time-series folds" help="Platt calibration fits a sigmoid layer on top of the logistic classifier so raw scores map to observed frequencies more realistically."/><Kpi label="Recent points" value={String(recentCalibration.length||'—')} sub="Trading-day replay" help="Number of recent completed prediction days shown in the return calibration chart."/></section>
+  <section className="panel"><PanelTitle label="Recent return calibration" note="Last 7 trading days · expected return vs actual Nifty return" help="This chart compares the model's expected-return percentage for each day against the actual next-session Nifty close-to-close return percentage. The x-axis is time, so misses and over/under-estimation are easy to inspect day by day."/><RecentReturnCalibrationChart data={recentCalibration} height={360}/></section></>
 }
 
 function Models({rows}:{rows:any[]}) {
@@ -793,6 +827,8 @@ function pct(v:number){return Number.isFinite(v)?`${(v*100).toFixed(1)}%`:'—'}
 function signedPct(v:number){return Number.isFinite(v)?`${v>=0?'+':''}${(v*100).toFixed(2)}%`:'—'}
 function num(v:number){return v?new Intl.NumberFormat('en-IN',{maximumFractionDigits:2}).format(v):'—'}
 function money(v:number){return Number.isFinite(v)?`${v>=0?'+':'-'}₹${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(Math.abs(v))}`:'—'}
+function shortDate(v:string){const d=new Date(`${v}T00:00:00`);return Number.isNaN(d.getTime())?v:d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}
+function monthYear(v:string){const d=new Date(`${v}T00:00:00`);return Number.isNaN(d.getTime())?v:d.toLocaleDateString('en-IN',{month:'short',year:'2-digit'})}
 function moneyShort(v:number){if(!Number.isFinite(v))return '—';const a=Math.abs(v),s=v<0?'-':'';return a>=100000?`${s}₹${(a/100000).toFixed(1)}L`:a>=1000?`${s}₹${(a/1000).toFixed(0)}k`:`${s}₹${a.toFixed(0)}`}
 function metric(b:Backtest|null,k:string,d=1){return b&&typeof b.metrics[k]==='number'?(k.includes('accuracy')?pct(Number(b.metrics[k])):Number(b.metrics[k]).toFixed(d)):'—'}
 const tip={background:'#0c1715',border:'1px solid #263d38',borderRadius:8,color:'#dce9e5'}

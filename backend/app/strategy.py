@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from math import erf, exp, isfinite, sqrt
+from math import exp, isfinite, log1p, sqrt
 from typing import Any
 
 import numpy as np
@@ -185,8 +185,16 @@ def _evaluate(name: str, family: str, legs: list[Leg], prediction: Prediction, c
     pop = float(weights[payoffs > 0].sum())
     breakevens = _breakevens(grid, payoffs)
     rr = max_profit / max_loss if max_loss > 0 and isfinite(max_profit) else None
-    directional_alignment = _alignment_bonus(family, prediction.probability_up)
-    score = (expected_profit / max_loss if max_loss else -99) + 0.55 * pop + directional_alignment
+    directional_alignment = _alignment_bonus(family, prediction)
+    reward_quality = log1p(rr or 0)
+    payoff_capacity = max_profit / (max_profit + max_loss) if max_profit > 0 and max_loss > 0 else 0
+    score = (
+        (expected_profit / max_loss if max_loss else -99)
+        + 0.30 * pop
+        + 0.18 * reward_quality
+        + 0.08 * payoff_capacity
+        + directional_alignment
+    )
     credit = sum((leg.price if leg.action == "SELL" else -leg.price) for leg in legs) * LOT_SIZE
     return {
         "name": name,
@@ -299,14 +307,18 @@ def _breakevens(grid: np.ndarray, payoffs: np.ndarray) -> list[float]:
     return [round(x, 2) for x in levels[:4]]
 
 
-def _alignment_bonus(family: str, probability_up: float) -> float:
+def _alignment_bonus(family: str, prediction: Prediction) -> float:
+    probability_up = prediction.probability_up
+    expected_return = prediction.expected_return
+    abs_move = abs(expected_return)
+    small_move = abs_move < 0.0025
     if family == "Bullish":
-        return max(0, probability_up - 0.50)
+        return max(0, probability_up - 0.50) + (0.12 if expected_return > 0.0015 else -0.18 if expected_return < -0.0015 else 0)
     if family == "Bearish":
-        return max(0, 0.50 - probability_up)
+        return max(0, 0.50 - probability_up) + (0.12 if expected_return < -0.0015 else -0.18 if expected_return > 0.0015 else 0)
     if family == "Neutral":
-        return max(0, 0.12 - abs(probability_up - 0.50))
-    return max(0, abs(probability_up - 0.50) - 0.08)
+        return max(0, 0.12 - abs(probability_up - 0.50)) + (0.10 if small_move else -0.05)
+    return -0.15 if small_move else max(0, abs(probability_up - 0.50) - 0.08)
 
 
 def _interpretation(name: str, prediction: Prediction, ev: float, pop: float, rr: float | None) -> str:
