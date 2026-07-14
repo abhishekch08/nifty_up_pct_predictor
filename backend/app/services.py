@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .data_sources import NSEOfficialSource, SYMBOLS, YahooChartSource, validate_frame
 from .features import build_feature_frame, classify_regime
-from .ml import explain_linear, load_model, signal_label, train_final, walk_forward
+from .ml import explain_linear, load_model, predict_returns, signal_label, train_final, walk_forward
 from .models import (BacktestResult, DataQualityLog, FlowDaily, MarketBreadth,
                      MarketDaily, ModelVersion, OptionEOD, ParticipantOI, Prediction)
 
@@ -250,7 +250,7 @@ def generate_prediction(db: Session, model: ModelVersion | None = None) -> dict:
     latest = frame.iloc[[-1]].copy()
     cols = artifact["features"]
     probability = float(artifact["classifier"].predict_proba(latest[cols])[:, 1][0])
-    expected_return = float(artifact["regressor"].predict(latest[cols])[0])
+    expected_return = float(predict_returns(artifact, latest)[0])
     close = float(latest.close.iloc[0])
     vix = _optional(latest.get("vix_close", pd.Series([np.nan])).iloc[0])
     hist_move = float(latest.get("realized_vol_20d", pd.Series([0.16])).iloc[0] / np.sqrt(252))

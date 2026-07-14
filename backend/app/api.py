@@ -11,7 +11,7 @@ from .database import get_db
 from .data_sources import SYMBOLS
 from .models import (BacktestResult, DataQualityLog, EventFlag, FlowDaily,
                      MarketDaily, ModelVersion, ParticipantOI, Prediction)
-from .ml import load_model
+from .ml import load_model, predict_returns
 from .services import (assembled_features, deploy_model, fetch_market_data,
                        generate_prediction, parse_upload, retrain,
                        serialize_prediction)
@@ -163,7 +163,7 @@ def calibration_recent(limit: int = Query(default=7, ge=1, le=30), db: Session =
         frame = assembled_features(db).sort_values("date").copy()
         frame["next_trading_day"] = frame["date"].shift(-1)
         clean = frame.dropna(subset=["target_next_day_return", "next_trading_day"]).tail(limit_value)
-        expected_returns = artifact["regressor"].predict(clean[artifact["features"]]) if len(clean) else []
+        expected_returns = predict_returns(artifact, clean) if len(clean) else []
         for (_, item), expected_return in zip(clean.iterrows(), expected_returns):
             day = item["date"]
             if hasattr(day, "date"):

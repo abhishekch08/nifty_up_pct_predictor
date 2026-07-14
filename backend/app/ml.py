@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import make_column_selector
+from sklearn.ensemble import HistGradientBoostingRegressor, VotingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score, brier_score_loss,
@@ -40,12 +41,19 @@ def classifier() -> Pipeline:
     return Pipeline([("calibrated", CalibratedClassifierCV(base, method="sigmoid", cv=3))])
 
 
-def regressor() -> Pipeline:
-    return Pipeline([
+def regressor() -> VotingRegressor:
+    ridge = Pipeline([
         ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
         ("scale", RobustScaler()),
-        ("model", Ridge(alpha=8.0)),
+        ("model", Ridge(alpha=5.0)),
     ])
+    nonlinear = Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+        ("scale", RobustScaler()),
+        ("model", HistGradientBoostingRegressor(max_iter=180, learning_rate=0.04, max_leaf_nodes=15,
+                                                l2_regularization=0.12, random_state=42)),
+    ])
+    return VotingRegressor([("ridge", ridge), ("nonlinear", nonlinear)], weights=[0.65, 0.35])
 
 
 @dataclass
@@ -69,9 +77,10 @@ def walk_forward(frame: pd.DataFrame, min_train: int = 756, test_size: int = 63,
         clf, reg = classifier(), regressor()
         clf.fit(train[cols], train.target_next_day_up.astype(int))
         reg.fit(train[cols], train.target_next_day_return)
+        return_bias = _return_bias(reg, train, cols)
         fold = test[["date", "target_next_day_up", "target_next_day_return"]].copy()
         fold["probability_up"] = clf.predict_proba(test[cols])[:, 1]
-        fold["expected_return"] = reg.predict(test[cols])
+        fold["expected_return"] = reg.predict(test[cols]) + return_bias
         outputs.append(fold)
     pred = pd.concat(outputs, ignore_index=True)
     y = pred.target_next_day_up.astype(int)
@@ -111,12 +120,29 @@ def train_final(frame: pd.DataFrame, artifact_dir: str) -> tuple[str, dict, dict
     clf, reg = classifier(), regressor()
     clf.fit(clean[cols], clean.target_next_day_up.astype(int))
     reg.fit(clean[cols], clean.target_next_day_return)
+    return_bias = _return_bias(reg, clean, cols)
     version = "v" + datetime.now(timezone.utc).strftime("%Y.%m.%d.%H%M%S")
-    artifact = {"classifier": clf, "regressor": reg, "features": cols, "trained_until": str(clean.date.iloc[-1])}
+    artifact = {"classifier": clf, "regressor": reg, "features": cols, "trained_until": str(clean.date.iloc[-1]),
+                "return_bias": return_bias}
     path = Path(artifact_dir) / f"{version}.joblib"
     joblib.dump(artifact, path)
-    meta = {"algorithm": "calibrated_logistic_plus_ridge", "feature_count": len(cols), "artifact_path": str(path)}
+    meta = {"algorithm": "calibrated_logistic_plus_ridge_hgb_residual_bias", "feature_count": len(cols),
+            "artifact_path": str(path), "return_bias": return_bias}
     return version, artifact, meta
+
+
+def predict_returns(artifact: dict, frame: pd.DataFrame) -> np.ndarray:
+    return np.asarray(artifact["regressor"].predict(frame[artifact["features"]]), dtype=float) + float(artifact.get("return_bias", 0.0))
+
+
+def _return_bias(reg, frame: pd.DataFrame, cols: list[str], window: int = 126) -> float:
+    tail = frame.dropna(subset=["target_next_day_return"]).tail(window)
+    if len(tail) < 20:
+        return 0.0
+    residual = np.asarray(tail.target_next_day_return, dtype=float) - np.asarray(reg.predict(tail[cols]), dtype=float)
+    if not np.isfinite(residual).any():
+        return 0.0
+    return float(np.clip(np.nanmedian(residual), -0.004, 0.004))
 
 
 def load_model(path: str) -> dict:

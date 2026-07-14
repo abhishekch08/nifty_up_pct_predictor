@@ -41,3 +41,9 @@ html[data-theme='light'] .step-input input{background:#fff!important;color:#1c2b
 .sensi-summary{min-width:0!important}
 @media(max-width:1760px){.strategy-builder{grid-template-columns:1fr!important}.strategy-topbar{grid-template-columns:1fr 170px!important}.strategy-right{margin-top:0!important}}
 @media(max-width:900px){.strategy-topbar{grid-template-columns:1fr!important}.legs-table.editable .legs-head,.legs-table.editable .leg-row{min-width:670px!important;grid-template-columns:26px 60px 98px 160px 78px 68px 94px!important}.ticket-actions{justify-content:flex-start!important;flex-wrap:wrap!important}.content{padding-left:16px!important;padding-right:16px!important}}
+
+/* Expiry field polish: keep compact labels readable and avoid ticket overflow. */
+.legs-table.editable .legs-head,.legs-table.editable .leg-row{min-width:750px!important;grid-template-columns:28px 64px 150px 170px 86px 72px 110px!important}
+.legs-table.editable select{white-space:nowrap!important;text-overflow:ellipsis!important}
+.ready-head select{min-width:170px!important}
+@media(max-width:900px){.legs-table.editable .legs-head,.legs-table.editable .leg-row{min-width:735px!important;grid-template-columns:26px 60px 142px 160px 78px 68px 94px!important}}

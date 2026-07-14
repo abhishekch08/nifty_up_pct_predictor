@@ -30,6 +30,8 @@ const sample: Prediction = {
   top_bullish_factors: [], top_bearish_factors: []
 }
 
+const MAX_STRATEGY_EXPIRY_DAYS = 700
+
 function App() {
   const [page, setPage] = useState<Page>('overview')
   const [mobile, setMobile] = useState(false)
@@ -192,7 +194,7 @@ function StrategyTomorrow() {
       if(r.status==='complete'){
         setSelectedName(r.selected.name)
         setLegs(cloneLegs(r.selected.legs))
-        if(!expiry) setExpiry(r.expiry)
+        if(!expiry || expiry!==r.expiry) setExpiry(r.expiry)
       }
     }).catch(e=>{if(alive){setError((e as Error).message);setLoading(false)}})
     return()=>{alive=false}
@@ -211,7 +213,9 @@ function StrategyTomorrow() {
   const chartData=attachOiBars(payoff.points, report.oi_bars||[])
   const comparison=report.candidates.map(c=>({strategy:c.name, family:c.family, pop:c.probability_profit, expected_pl:c.expected_profit, max_profit:c.max_profit, max_loss:-c.max_loss, rr:c.risk_reward ?? 0}))
   const history=report.history.slice(0,14).map(h=>({date:h.date, suggested:h.strategy, prob_up:h.probability_up, nifty_return:h.nifty_return, estimated_pl:h.estimated_pl, outcome:h.outcome}))
-  const expiryOptions=report.expiries?.length ? report.expiries : [{expiry:report.expiry,label:report.expiry,days:0}]
+  const expiryOptions=(report.expiries?.length ? report.expiries : [{expiry:report.expiry,label:report.expiry,days:0}])
+    .filter(x=>x.days===undefined || x.days<=MAX_STRATEGY_EXPIRY_DAYS)
+  const currentExpiryOptions=expiryOptions.length ? expiryOptions : [{expiry:report.expiry,label:report.expiry,days:0}]
   const strikeStep=strikeStepFromChain(report.option_chain)||50
   const lotValue=activeLegs[0]?.lots || 1
   const updateLeg=(index:number, patch:Partial<StrategyLeg>)=>setLegs(prev=>prev.map((leg,i)=>{
@@ -240,7 +244,7 @@ function StrategyTomorrow() {
             {activeLegs.map((leg,i)=><div className="leg-row" key={`${i}-${leg.action}-${leg.type}-${leg.strike}`}>
               <input aria-label="Include leg" type="checkbox" checked readOnly/>
               <select className={leg.action==='BUY'?'buy-select':'sell-select'} value={leg.action} onChange={e=>updateLeg(i,{action:e.target.value as 'BUY'|'SELL'})}><option value="BUY">B</option><option value="SELL">S</option></select>
-              <select value={expiry} onChange={e=>setExpiry(e.target.value)}>{expiryOptions.map(x=><option key={x.expiry} value={x.expiry}>{x.label}</option>)}</select>
+              <select value={expiry} onChange={e=>setExpiry(e.target.value)} title={currentExpiryOptions.find(x=>x.expiry===expiry)?.label}>{currentExpiryOptions.map(x=><option key={x.expiry} value={x.expiry}>{compactExpiryLabel(x)}</option>)}</select>
               <div className="step-input"><button onClick={()=>updateLeg(i,{strike:leg.strike-strikeStep})}>−</button><input type="number" step={strikeStep} value={leg.strike} onChange={e=>updateLeg(i,{strike:+e.target.value})}/><button onClick={()=>updateLeg(i,{strike:leg.strike+strikeStep})}>+</button></div>
               <select value={leg.type} onChange={e=>updateLeg(i,{type:e.target.value as 'CE'|'PE'})}><option>CE</option><option>PE</option></select>
               <input type="number" min="1" value={leg.lots} onChange={e=>updateLeg(i,{lots:Math.max(1,+e.target.value||1)})}/>
@@ -255,7 +259,7 @@ function StrategyTomorrow() {
           <div className="builder-buttons"><button>Add/Edit</button><button>Add to Drafts</button><button disabled>Trade All</button></div>
         </div>
         <div className="panel ready-panel">
-          <div className="ready-head"><b>Ready-made</b><span>Click a capped-loss template to load it</span><label>Expiry <select value={expiry} onChange={e=>setExpiry(e.target.value)}>{expiryOptions.map(x=><option key={x.expiry} value={x.expiry}>{x.label}</option>)}</select></label></div>
+          <div className="ready-head"><b>Ready-made</b><span>Click a capped-loss template to load it</span><label>Expiry <select value={expiry} onChange={e=>setExpiry(e.target.value)} title={currentExpiryOptions.find(x=>x.expiry===expiry)?.label}>{currentExpiryOptions.map(x=><option key={x.expiry} value={x.expiry}>{compactExpiryLabel(x)}</option>)}</select></label></div>
           <div className="strategy-ready">
             {report.candidates.map(candidate=><button type="button" key={candidate.name} onClick={()=>chooseCandidate(candidate)}><StrategyMini name={candidate.name} active={candidate.name===selected.name}/></button>)}
           </div>
@@ -271,7 +275,7 @@ function StrategyTomorrow() {
           <div><span>Funds & Margins</span><b>{money(summary.margin)}</b></div>
         </div>
         <div className="panel payoff-panel sensi-card">
-          <PanelTitle label="Strategy payoff workspace" note={`${selected.name} · ${expiryOptions.find(x=>x.expiry===expiry)?.label || report.expiry}`} help="Sensibull-style payoff workspace for the strategy currently loaded in the ticket. The fixed recommendation below stays locked to the engine's best strategy; this workspace lets you inspect alternatives without rewriting the recommendation."/>
+          <PanelTitle label="Strategy payoff workspace" note={`${selected.name} · ${currentExpiryOptions.find(x=>x.expiry===expiry)?.label || report.expiry}`} help="Sensibull-style payoff workspace for the strategy currently loaded in the ticket. The fixed recommendation below stays locked to the engine's best strategy; this workspace lets you inspect alternatives without rewriting the recommendation."/>
           <div className="payoff-tabs">
             {(['graph','pl','greeks','chart'] as const).map(item=><button className={tab===item?'active':''} onClick={()=>setTab(item)} key={item}>{item==='graph'?'Payoff Graph':item==='pl'?'P&L Table':item==='greeks'?'Greeks':'Strategy Chart'}</button>)}
             <label className="booked-toggle"><input type="checkbox" checked readOnly/> Add Booked P&L</label>
@@ -281,8 +285,8 @@ function StrategyTomorrow() {
           {tab==='greeks' && <StrategyGreeks legs={activeLegs} report={report}/>}
           {tab==='chart' && <StrategyPriceChart data={chartData}/>}
           <div className="strategy-lower">
-            <div><b>Strikewise IVs</b>{activeLegs.map((leg,i)=><p key={i}>{num(leg.strike)} {leg.type} · {expiryLabel(leg.expiry, expiryOptions)} · IV {(report.prediction?.india_vix||14).toFixed(1)}%</p>)}</div>
-            <div><b>Target Day Futures Prices</b><p>{expiryLabel(report.expiry, expiryOptions)} FUT {num(report.spot*(1+(report.prediction?.expected_return||0)))}</p><p>1 SD {num(report.prediction?.expected_lower_range||0)} / {num(report.prediction?.expected_upper_range||0)}</p></div>
+            <div><b>Strikewise IVs</b>{activeLegs.map((leg,i)=><p key={i}>{num(leg.strike)} {leg.type} · {expiryLabel(leg.expiry, currentExpiryOptions)} · IV {(report.prediction?.india_vix||14).toFixed(1)}%</p>)}</div>
+            <div><b>Target Day Futures Prices</b><p>{expiryLabel(report.expiry, currentExpiryOptions)} FUT {num(report.spot*(1+(report.prediction?.expected_return||0)))}</p><p>1 SD {num(report.prediction?.expected_lower_range||0)} / {num(report.prediction?.expected_upper_range||0)}</p></div>
           </div>
         </div>
       </div>
@@ -421,6 +425,7 @@ function strikeStepFromChain(chain:StrategyReport['option_chain']){const strikes
 function nearestStrike(spot:number,chain:StrategyReport['option_chain']){const strikes=(chain||[]).map(x=>x.strike);return strikes.length?strikes.reduce((a,b)=>Math.abs(b-spot)<Math.abs(a-spot)?b:a,strikes[0]):spot}
 function oiTotal(bars:StrategyReport['oi_bars'],key:'call_oi'|'put_oi'){const total=(bars||[]).reduce((a,b)=>a+Number(b[key]||0),0);return total>=10000000?`${(total/10000000).toFixed(2)}Cr`:`${(total/100000).toFixed(2)}L`}
 function expiryLabel(expiry:string,options?:{expiry:string;label:string}[]){return options?.find(x=>x.expiry===expiry)?.label?.replace(/\s+\(.+\)/,'') || expiry}
+function compactExpiryLabel(option:{expiry:string;label:string;days?:number}){const base=expiryLabel(option.expiry,[option]);return typeof option.days==='number'?`${base} (${option.days}D)`:base}
 
 function StrategyTomorrowOld() {
   const [report,setReport]=useState<StrategyReport|null>(null)
@@ -599,12 +604,14 @@ function MethodologyReport() {
         <p>Calibration is crucial because the output is used as a probability scale, not just a directional score.</p>
       </DocCard>
 
-      <DocCard title="7. Expected return model: Ridge regression" help="Expected-return model and its use in the dashboard.">
-        <p>A separate Ridge regression estimates next-session return. It supports the expected-return display, signal labeling and range calculation.</p>
-        <Formula label="Return forecast" value="r_hat,t+1 = alpha_0 + theta' x_t"/>
-        <Formula label="Ridge objective" value="min_theta sum (r_{t+1} - r_hat,t+1)^2 + lambda ||theta||^2"/>
-        <Formula label="Configured alpha" value="lambda = 8.0"/>
-        <p>Ridge regularization shrinks unstable coefficients, which is helpful because market features are often correlated.</p>
+      <DocCard title="7. Expected return model: Ridge + nonlinear residual correction" help="Expected-return model and its use in the dashboard.">
+        <p>A separate return model estimates next-session percentage return. The current live model blends a stable Ridge regression with a histogram-gradient nonlinear regressor, then applies a rolling residual-bias adjustment learned only from past training-window errors.</p>
+        <Formula label="Ridge component" value="r_ridge,t+1 = alpha_0 + theta' x_t"/>
+        <Formula label="Nonlinear component" value="r_hgb,t+1 = tree_ensemble(x_t), constrained with shallow leaves and L2 regularization"/>
+        <Formula label="Blended forecast" value="r_raw,t+1 = 0.65 x r_ridge,t+1 + 0.35 x r_hgb,t+1"/>
+        <Formula label="Residual bias" value="b_T = median(r_actual - r_raw) over the latest 126 training rows, clipped to +/-0.40%"/>
+        <Formula label="Final expected return" value="r_hat,t+1 = r_raw,t+1 + b_T"/>
+        <p>This reduces systematic under/over-shoot in recent regimes while keeping the forecast regularized. It cannot remove event risk or one-day market shocks.</p>
       </DocCard>
 
       <DocCard title="8. Walk-forward validation design" help="How the backtest mimics real-time use.">
@@ -749,8 +756,8 @@ function Methodology() {
         <p>The probability model is intentionally interpretable and stable rather than a black-box deep model.</p>
         <ul>
           <li><b>Classifier:</b> median imputation + missing indicators → robust scaling → class-balanced logistic regression → Platt sigmoid calibration.</li>
-          <li><b>Regressor:</b> median imputation + missing indicators → robust scaling → Ridge regression for expected next-day return.</li>
-          <li><b>Hyperparameters:</b> logistic C = 0.25, liblinear solver, max_iter = 2000; Ridge alpha = 8.0.</li>
+          <li><b>Regressor:</b> median imputation + missing indicators → robust scaling → Ridge + histogram-gradient ensemble, followed by rolling residual-bias correction for expected next-day return.</li>
+          <li><b>Hyperparameters:</b> logistic C = 0.25, liblinear solver, max_iter = 2000; Ridge alpha = 5.0; histogram-gradient max_iter = 180, learning_rate = 0.04, max_leaf_nodes = 15, L2 = 0.12.</li>
           <li><b>Calibration:</b> sigmoid / Platt calibration using time-series folds inside the classifier wrapper.</li>
         </ul>
       </DocCard>

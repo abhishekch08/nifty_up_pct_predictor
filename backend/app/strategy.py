@@ -14,6 +14,7 @@ from .models import MarketDaily, OptionEOD, Prediction
 from .services import serialize_prediction
 
 LOT_SIZE = 75
+MAX_STRATEGY_EXPIRY_DAYS = 700
 
 
 @dataclass(frozen=True)
@@ -73,9 +74,7 @@ def strategy_history(db: Session, limit: int = 14) -> list[dict]:
 
 
 def _expiry_options(rows: list[OptionEOD], prediction_date) -> list[dict]:
-    valid_expiries = sorted({row.expiry for row in rows if row.expiry >= prediction_date})
-    if not valid_expiries:
-        valid_expiries = sorted({row.expiry for row in rows})
+    valid_expiries = _valid_expiries(rows, prediction_date)
     options = []
     for item in valid_expiries:
         days = max((item - prediction_date).days, 0)
@@ -85,9 +84,7 @@ def _expiry_options(rows: list[OptionEOD], prediction_date) -> list[dict]:
 
 
 def _nearest_expiry_chain(rows: list[OptionEOD], prediction_date, selected_expiry: date | None = None) -> list[dict]:
-    valid_expiries = sorted({row.expiry for row in rows if row.expiry >= prediction_date})
-    if not valid_expiries:
-        valid_expiries = sorted({row.expiry for row in rows})
+    valid_expiries = _valid_expiries(rows, prediction_date)
     expiry = selected_expiry if selected_expiry in valid_expiries else valid_expiries[0]
     chain = []
     for row in rows:
@@ -108,6 +105,17 @@ def _nearest_expiry_chain(rows: list[OptionEOD], prediction_date, selected_expir
             "pe_oi": float(row.pe_oi or 0),
         })
     return sorted(chain, key=lambda item: item["strike"])
+
+
+def _valid_expiries(rows: list[OptionEOD], prediction_date) -> list[date]:
+    valid_expiries = sorted({row.expiry for row in rows if row.expiry > prediction_date})
+    if not valid_expiries:
+        valid_expiries = sorted({row.expiry for row in rows})
+    capped = [
+        item for item in valid_expiries
+        if max((item - prediction_date).days, 0) <= MAX_STRATEGY_EXPIRY_DAYS
+    ]
+    return capped or valid_expiries[:1]
 
 
 def _option_chain_payload(chain: list[dict]) -> list[dict]:
