@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: nifty-up-pct-predictor
+    runtime: python
+    plan: free
+    region: singapore
+    rootDir: backend
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.13
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        value: sqlite:///./data/nifty.db
+      - key: DATA_DIR
+        value: ./data
+      - key: MODEL_ARTIFACT_DIR
+        value: ./artifacts
+      - key: SCHEDULER_ENABLED
+        value: "false"
+      - key: CORS_ORIGINS
+        value: https://nifty-up-pct-predictor.onrender.com
+      - key: ADMIN_API_KEY
+        generateValue: true

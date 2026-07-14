@@ -120,7 +120,17 @@ def train_final(frame: pd.DataFrame, artifact_dir: str) -> tuple[str, dict, dict
 
 
 def load_model(path: str) -> dict:
-    return joblib.load(path)
+    from .config import get_settings
+
+    normalized = Path(path.replace("\\", "/"))
+    candidates = [Path(path), normalized]
+    if not normalized.is_absolute():
+        candidates.append(Path(get_settings().model_artifact_dir) / normalized.name)
+    for candidate in candidates:
+        if candidate.exists():
+            return joblib.load(candidate)
+    tried = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Model artifact not found. Tried: {tried}")
 
 
 def signal_label(probability: float, expected_return: float, cost_bps: float = 3.0) -> str:
