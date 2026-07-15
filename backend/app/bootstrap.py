@@ -1,5 +1,5 @@
 """First-run and daily local bootstrap: fetch, validate, train, deploy, predict."""
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 
@@ -8,6 +8,8 @@ from sqlalchemy import select
 from .database import Base, SessionLocal, engine
 from .models import ModelVersion
 from .services import assembled_features, deploy_model, fetch_market_data, generate_prediction, retrain
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def main() -> None:
@@ -22,7 +24,7 @@ def main() -> None:
                 print(f"         {warning}", flush=True)
 
         official_date = fetched.get("official_trading_date")
-        if not official_date or official_date < date.today() - timedelta(days=4):
+        if not official_date or official_date < datetime.now(IST).date() - timedelta(days=4):
             raise RuntimeError("Official NSE EOD data is unavailable or stale; model bootstrap stopped")
 
         print("[2/3] Validating aligned features...", flush=True)
@@ -64,4 +66,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"BOOTSTRAP FAILED: {exc}", flush=True)
         raise SystemExit(1) from exc
-

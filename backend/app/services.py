@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,7 @@ from .models import (BacktestResult, DataQualityLog, FlowDaily, MarketBreadth,
                      MarketDaily, ModelVersion, OptionEOD, ParticipantOI, Prediction)
 
 IST = timezone(timedelta(hours=5, minutes=30))
+AUTO_REFRESH_LOCK = Lock()
 
 
 def next_weekday(day: date) -> date:
@@ -100,9 +102,31 @@ def upsert_options(db: Session, frame: pd.DataFrame) -> int:
     return len(frame)
 
 
-def fetch_market_data(db: Session, years: int = 12) -> dict:
-    source = YahooChartSource()
-    end, start = date.today(), date.today() - timedelta(days=365 * years)
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _today_ist() -> date:
+    return _now_ist().date()
+
+
+def _previous_weekday(day: date) -> date:
+    item = day - timedelta(days=1)
+    while item.weekday() >= 5:
+        item -= timedelta(days=1)
+    return item
+
+
+def _expected_eod_date(now: datetime | None = None) -> date:
+    now = now or _now_ist()
+    if now.weekday() >= 5 or now.time() < time(17, 30):
+        return _previous_weekday(now.date())
+    return now.date()
+
+
+def fetch_market_data(db: Session, years: int = 12, cache_hours: int = 6) -> dict:
+    source = YahooChartSource(cache_hours=cache_hours)
+    end, start = _today_ist(), _today_ist() - timedelta(days=365 * years)
     statuses = []
     fetched = 0
     for label, ticker in SYMBOLS.items():
@@ -144,7 +168,7 @@ def fetch_market_data(db: Session, years: int = 12) -> dict:
                 db.rollback()
                 statuses.append({"dataset": dataset, "symbol": dataset, "status": "degraded", "rows": 0,
                                  "missing_fields": [], "warnings": [str(exc)], "source": provenance})
-    today = date.today()
+    today = _today_ist()
     for status in statuses:
         db.add(DataQualityLog(date=today, dataset=status["dataset"], status=status["status"],
                               missing_fields=status["missing_fields"], warnings=status["warnings"],
@@ -199,6 +223,128 @@ def assembled_features(db: Session) -> pd.DataFrame:
                                participant_frame(db), options_frame(db), breadth_frame(db))
 
 
+def auto_refresh(db: Session, force: bool = False) -> dict:
+    settings = get_settings()
+    if not settings.auto_refresh_enabled and not force:
+        return {"status": "disabled", "message": "Automatic refresh is disabled on this server."}
+    with AUTO_REFRESH_LOCK:
+        return _auto_refresh_locked(db, force)
+
+
+def _auto_refresh_locked(db: Session, force: bool = False) -> dict:
+    settings = get_settings()
+    now = _now_ist()
+    target_date = _expected_eod_date(now)
+    before_market_date = _latest_market_date(db)
+    before_prediction = _latest_prediction_row(db)
+    deployed = _deployed_model(db)
+    if not force and _is_prediction_current(before_market_date, before_prediction, target_date):
+        return _refresh_payload("fresh", target_date, before_market_date, before_prediction, deployed,
+                                message="Already current for the latest completed EOD window.")
+
+    local_prediction_stale = bool(before_market_date and (not before_prediction or before_prediction.date < before_market_date))
+    if not force and not local_prediction_stale and _recent_refresh_attempt(db, minutes=settings.auto_refresh_min_minutes):
+        return _refresh_payload("throttled", target_date, before_market_date, before_prediction, deployed,
+                                message=f"Refresh was attempted recently; waiting {settings.auto_refresh_min_minutes} minutes before retrying sources.")
+
+    result: dict[str, Any] = {"actions": []}
+    fetched = fetch_market_data(db, years=3 if before_market_date else 12, cache_hours=1)
+    result["actions"].append("fetch")
+    result["fetch"] = fetched
+
+    after_market_date = _latest_market_date(db)
+    deployed = _deployed_model(db)
+    latest_trainable = _latest_trainable_date(db)
+    artifact_exists = _artifact_available(deployed)
+    prediction: dict | None = None
+
+    if not deployed or not artifact_exists:
+        trained = retrain(db)
+        result["actions"].append("retrain")
+        result["trained"] = {"model_version": trained["model_version"], "status": trained["status"]}
+        if trained["status"] == "eligible":
+            deployed_result = deploy_model(db, trained["model_version"])
+            result["actions"].append("deploy")
+            prediction = deployed_result["prediction"]
+        else:
+            raise ValueError("No deployable model is available after automatic retraining.")
+    elif settings.auto_retrain_on_refresh and latest_trainable and deployed.training_end < latest_trainable:
+        trained = retrain(db)
+        result["actions"].append("retrain")
+        result["trained"] = {"model_version": trained["model_version"], "status": trained["status"]}
+        if trained["status"] == "eligible":
+            deployed_result = deploy_model(db, trained["model_version"])
+            result["actions"].append("deploy")
+            prediction = deployed_result["prediction"]
+        else:
+            prediction = generate_prediction(db, deployed)
+            result["actions"].append("predict_existing_model")
+    elif not before_prediction or (after_market_date and before_prediction.date < after_market_date):
+        prediction = generate_prediction(db, deployed)
+        result["actions"].append("predict")
+
+    after_prediction = _latest_prediction_row(db)
+    status = "updated" if result["actions"] else "checked"
+    return {**_refresh_payload(status, target_date, after_market_date, after_prediction, _deployed_model(db)),
+            **result, "prediction": prediction or (serialize_prediction(after_prediction) if after_prediction else None)}
+
+
+def _latest_market_date(db: Session) -> date | None:
+    return db.scalar(select(MarketDaily.date).where(MarketDaily.symbol == SYMBOLS["NIFTY"]).order_by(MarketDaily.date.desc()))
+
+
+def _latest_prediction_row(db: Session) -> Prediction | None:
+    return db.scalar(select(Prediction).order_by(Prediction.created_at.desc()))
+
+
+def _deployed_model(db: Session) -> ModelVersion | None:
+    return db.scalar(select(ModelVersion).where(ModelVersion.status == "deployed").order_by(ModelVersion.created_at.desc()))
+
+
+def _latest_trainable_date(db: Session) -> date | None:
+    frame = assembled_features(db)
+    trainable = frame.dropna(subset=["target_next_day_up"])
+    if trainable.empty:
+        return None
+    value = trainable.date.iloc[-1]
+    return value.date() if hasattr(value, "date") else value
+
+
+def _artifact_available(model: ModelVersion | None) -> bool:
+    if not model:
+        return False
+    try:
+        load_model(model.artifact_path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _is_prediction_current(market_date: date | None, prediction: Prediction | None, target_date: date) -> bool:
+    return bool(market_date and prediction and prediction.date >= market_date and market_date >= target_date)
+
+
+def _recent_refresh_attempt(db: Session, minutes: int) -> bool:
+    latest = db.scalar(select(DataQualityLog.created_at).order_by(DataQualityLog.created_at.desc()))
+    if not latest:
+        return False
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - latest.astimezone(timezone.utc) < timedelta(minutes=minutes)
+
+
+def _refresh_payload(status: str, target_date: date, market_date: date | None, prediction: Prediction | None,
+                     model: ModelVersion | None, message: str | None = None) -> dict:
+    return {
+        "status": status,
+        "message": message,
+        "target_eod_date": target_date.isoformat(),
+        "latest_market_date": market_date.isoformat() if market_date else None,
+        "latest_prediction_date": prediction.date.isoformat() if prediction else None,
+        "model_version": model.version if model else None,
+    }
+
+
 def retrain(db: Session) -> dict:
     settings = get_settings()
     frame = assembled_features(db)
@@ -215,7 +361,9 @@ def retrain(db: Session) -> dict:
     metrics = {**result.metrics, "majority_baseline_accuracy": float(majority), "deployment_gates": gates}
     db.add(ModelVersion(version=version, algorithm=meta["algorithm"], training_start=clean.date.iloc[0],
                         training_end=clean.date.iloc[-1], feature_set_version="v1", calibration_method="platt_sigmoid",
-                        hyperparameters={"classifier_C": 0.25, "ridge_alpha": 8.0}, metrics=metrics,
+                        hyperparameters={"classifier_C": 0.25, "ridge_alpha": 5.0, "hgb_max_iter": 180,
+                                         "hgb_learning_rate": 0.04, "hgb_max_leaf_nodes": 15,
+                                         "return_bias": meta.get("return_bias", 0.0)}, metrics=metrics,
                         artifact_path=meta["artifact_path"], status=status))
     equity = _equity_curve(result.predictions)
     db.add(BacktestResult(model_version=version, start_date=result.predictions.date.iloc[0],

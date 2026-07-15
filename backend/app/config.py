@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     model_artifact_dir: str = "./artifacts"
     data_dir: str = "./data"
     scheduler_enabled: bool = False
+    auto_refresh_enabled: bool = True
+    auto_retrain_on_refresh: bool = True
+    auto_refresh_min_minutes: int = 15
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

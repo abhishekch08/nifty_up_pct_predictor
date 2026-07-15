@@ -12,7 +12,7 @@ from .data_sources import SYMBOLS
 from .models import (BacktestResult, DataQualityLog, EventFlag, FlowDaily,
                      MarketDaily, ModelVersion, ParticipantOI, Prediction)
 from .ml import load_model, predict_returns
-from .services import (assembled_features, deploy_model, fetch_market_data,
+from .services import (assembled_features, auto_refresh, deploy_model, fetch_market_data,
                        generate_prediction, parse_upload, retrain,
                        serialize_prediction)
 from .strategy import strategy_history, strategy_report
@@ -40,6 +40,14 @@ class EventRequest(BaseModel):
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "nifty-probability-terminal", "environment": get_settings().app_env}
+
+
+@router.post("/auto-refresh")
+def auto_refresh_endpoint(force: bool = Query(default=False), db: Session = Depends(get_db)) -> dict:
+    try:
+        return auto_refresh(db, force=force)
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
 
 
 @router.get("/latest-prediction")

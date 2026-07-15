@@ -46,6 +46,15 @@ function App() {
 
   const refresh = async () => {
     setLoading(true)
+    let refreshNotice = ''
+    try {
+      const sync = await api<any>('/api/auto-refresh', { method: 'POST' })
+      if (sync.status === 'updated') refreshNotice = `Latest data refreshed through ${sync.latest_market_date || sync.target_eod_date}.`
+      else if (sync.status === 'throttled') refreshNotice = sync.message || 'Freshness check was recently attempted; showing latest verified data.'
+      else if (sync.status === 'error') refreshNotice = `Auto-refresh could not complete: ${sync.message}`
+    } catch (e) {
+      refreshNotice = `Auto-refresh could not complete: ${(e as Error).message}`
+    }
     const [p, b, m, d, c] = await Promise.allSettled([
       api<Prediction>('/api/latest-prediction'), api<Backtest>('/api/backtest/latest'),
       api<any[]>('/api/models'), api<any>('/api/data-status'), api<RecentCalibrationPoint[]>('/api/calibration/recent?limit=7')
@@ -56,6 +65,7 @@ function App() {
     if (m.status === 'fulfilled') setModels(m.value)
     if (d.status === 'fulfilled') setDataStatus(d.value)
     if (c.status === 'fulfilled') setRecentCalibration(c.value)
+    if (refreshNotice && p.status === 'fulfilled') setNotice(refreshNotice)
     setLoading(false)
   }
   useEffect(() => { refresh() }, [])
