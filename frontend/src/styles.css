@@ -47,3 +47,23 @@ html[data-theme='light'] .step-input input{background:#fff!important;color:#1c2b
 .legs-table.editable select{white-space:nowrap!important;text-overflow:ellipsis!important}
 .ready-head select{min-width:170px!important}
 @media(max-width:900px){.legs-table.editable .legs-head,.legs-table.editable .leg-row{min-width:735px!important;grid-template-columns:26px 60px 142px 160px 78px 68px 94px!important}}
+
+/* Groww execution checklist. */
+.groww-panel{margin-top:14px}
+.groww-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.groww-kpis div{border:1px solid var(--line);background:#091310;border-radius:8px;padding:11px}
+.groww-kpis span{display:block;color:var(--muted);font:8px DM Mono;text-transform:uppercase;letter-spacing:.7px}
+.groww-kpis b{display:block;margin-top:6px;font:500 15px DM Mono}
+.groww-table table{font-size:10.5px!important}
+.groww-table td:first-child,.groww-table th:first-child{width:34px;text-align:center}
+.groww-table td:nth-child(2){font-weight:700;color:#dce9e5}
+.groww-table b.buy,.groww-table b.sell{display:inline-grid;place-items:center;min-width:42px;border-radius:14px;padding:4px 8px;font:700 10px DM Mono}
+.groww-table b.buy{color:#8fc5ff;background:#0f3157}
+.groww-table b.sell{color:#ffaaa8;background:#3a1d1d}
+.groww-note{border:1px solid #243b35;background:#091310;border-radius:8px;margin-top:12px;padding:11px;color:#9bb0aa;font-size:11px;line-height:1.65}
+.groww-note b{color:#dce9e5}
+.groww-note span{display:block;margin-top:4px}
+html[data-theme=light] .groww-kpis div,html[data-theme=light] .groww-note{background:#f8fbff;border-color:#d7e0ea}
+html[data-theme=light] .groww-table td:nth-child(2),html[data-theme=light] .groww-note b{color:#1c2b33}
+@media(max-width:900px){.groww-kpis{grid-template-columns:1fr 1fr}.groww-table table{min-width:780px}}
+@media(max-width:560px){.groww-kpis{grid-template-columns:1fr}}

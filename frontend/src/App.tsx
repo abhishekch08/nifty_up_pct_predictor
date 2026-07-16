@@ -277,6 +277,7 @@ function StrategyTomorrow() {
             {report.candidates.map(candidate=><button type="button" key={candidate.name} onClick={()=>chooseCandidate(candidate)}><StrategyMini name={candidate.name} active={candidate.name===selected.name}/></button>)}
           </div>
         </div>
+        <GrowwOrderPanel report={report} selected={recommended} legs={recommendedLegs} summary={recommendedSummary} expiryOptions={currentExpiryOptions}/>
       </div>
       <div className="strategy-right">
         <div className="panel sensi-summary">
@@ -285,7 +286,7 @@ function StrategyTomorrow() {
           <div><span>Breakeven</span><b>{summary.breakevens.length ? summary.breakevens.map(num).join(', ') : '—'}</b></div>
           <div><span>Reward / Risk</span><b>{summary.riskReward?`${summary.riskReward.toFixed(2)}x`:'—'}</b></div>
           <div><span>POP</span><b>{pct(summary.probabilityProfit)}</b></div>
-          <div><span>Funds & Margins</span><b>{money(summary.margin)}</b></div>
+          <div><span>Funds & Margins <InfoTip text="Estimated funds for the complete multi-leg basket. It uses every buy and sell leg: total BUY premium, SELL premium credit, net debit/credit and capped max loss. Groww's final broker margin can differ, so treat this as a planning estimate."/></span><b>{money(summary.margin)}</b></div>
         </div>
         <div className="panel payoff-panel sensi-card">
           <PanelTitle label="Strategy payoff workspace" note={`${selected.name} · ${currentExpiryOptions.find(x=>x.expiry===expiry)?.label || report.expiry}`} help="Sensibull-style payoff workspace for the strategy currently loaded in the ticket. The fixed recommendation below stays locked to the engine's best strategy; this workspace lets you inspect alternatives without rewriting the recommendation."/>
@@ -328,6 +329,31 @@ function StrategyTomorrow() {
     </section>
     <Disclaimer/>
   </>
+}
+
+function GrowwOrderPanel({report,selected,legs,summary,expiryOptions}:{report:StrategyReport;selected:StrategyCandidate;legs:StrategyLeg[];summary:any;expiryOptions:{expiry:string;label:string;days?:number}[]}) {
+  const plan=buildGrowwPlan(report,legs,summary,expiryOptions)
+  return <div className="panel groww-panel">
+    <PanelTitle label="Groww order entry" note={`Prefilled ticket values for ${selected.name}`} help="Use this as the leg-by-leg entry checklist in Groww. Search each instrument, choose Buy or Sell, select Delivery, enter NSE quantity, choose Price Limit and use the displayed limit price. For spreads/condors/butterflies, buying hedge legs first usually reduces naked short margin while placing orders manually."/>
+    <div className="groww-kpis">
+      <div><span>Buy premium</span><b>{money(plan.buyPremium)}</b></div>
+      <div><span>Sell premium</span><b>{money(plan.sellPremium)}</b></div>
+      <div><span>Net {plan.netPremium>=0?'credit':'debit'}</span><b className={plan.netPremium>=0?'green':'red'}>{money(Math.abs(plan.netPremium))}</b></div>
+      <div><span>Estimated funds</span><b>{money(plan.estimatedFunds)}</b></div>
+    </div>
+    <div className="table-scroll groww-table">
+      <table>
+        <thead><tr>{['#','Groww search / instrument','B/S','Product','Qty NSE','Lots','Limit price','Cash flow'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+        <tbody>{plan.rows.map((row:any)=><tr key={row.sequence}>
+          <td>{row.sequence}</td><td>{row.instrument}</td><td><b className={row.action==='BUY'?'buy':'sell'}>{row.side}</b></td><td>{row.product}</td><td>{row.qty}</td><td>{row.lots}</td><td>{row.limitPrice}</td><td className={row.cashFlow.startsWith('+')?'green':'red'}>{row.cashFlow}</td>
+        </tr>)}</tbody>
+      </table>
+    </div>
+    <div className="groww-note">
+      <b>Order sequence:</b> {plan.sequenceNote}
+      <span> Estimated funds = max(capped max loss, total BUY premium, net debit). This is a basket planning estimate; Groww's live “Approx req.” is final because broker SPAN/exposure margin, hedge benefit, taxes and price movement update in real time.</span>
+    </div>
+  </div>
 }
 
 function StrategyPayoffGraph({data,report,selected,summary}:{data:any[];report:StrategyReport;selected:StrategyCandidate;summary:any}) {
@@ -428,7 +454,40 @@ function summarizeStrategy(report:StrategyReport,selected:StrategyCandidate,legs
   const probabilityProfit=vals.filter(v=>v>0).length/Math.max(vals.length,1)
   const premium=legs.reduce((sum,leg)=>sum+(leg.action==='SELL'?1:-1)*leg.price*report.lot_size*(leg.lots||1),0)
   const breakevens=breakevensFromPoints(payoff.points)
-  return {maxProfit,maxLoss,expectedProfit,probabilityProfit,premium,breakevens,riskReward:maxLoss?maxProfit/maxLoss:0,margin:maxLoss+Math.max(0,-premium)}
+  const execution=estimateExecutionFunds(report,legs,maxLoss)
+  return {maxProfit,maxLoss,expectedProfit,probabilityProfit,premium,breakevens,riskReward:maxLoss?maxProfit/maxLoss:0,margin:execution.estimatedFunds,execution}
+}
+function estimateExecutionFunds(report:StrategyReport,legs:StrategyLeg[],maxLoss:number){
+  const buyPremium=legs.reduce((sum,leg)=>sum+(leg.action==='BUY'?leg.price*report.lot_size*(leg.lots||1):0),0)
+  const sellPremium=legs.reduce((sum,leg)=>sum+(leg.action==='SELL'?leg.price*report.lot_size*(leg.lots||1):0),0)
+  const netPremium=sellPremium-buyPremium
+  const netDebit=Math.max(0,buyPremium-sellPremium)
+  const hasShort=legs.some(leg=>leg.action==='SELL')
+  const estimatedFunds=hasShort?Math.max(maxLoss,buyPremium,netDebit):buyPremium
+  return {buyPremium,sellPremium,netPremium,netDebit,estimatedFunds}
+}
+function buildGrowwPlan(report:StrategyReport,legs:StrategyLeg[],summary:any,expiryOptions:{expiry:string;label:string;days?:number}[]){
+  const execution=summary.execution || estimateExecutionFunds(report,legs,summary.maxLoss||0)
+  const sequenced=[...legs].sort((a,b)=>a.action===b.action?Math.abs(a.strike-report.spot)-Math.abs(b.strike-report.spot):a.action==='BUY'?-1:1)
+  const rows=sequenced.map((leg,index)=>{
+    const qty=report.lot_size*(leg.lots||1)
+    const cash=(leg.action==='SELL'?1:-1)*leg.price*qty
+    return {
+      sequence:index+1,
+      action:leg.action,
+      side:leg.action==='BUY'?'Buy':'Sell',
+      product:'Delivery',
+      instrument:`NIFTY ${expiryLabel(leg.expiry,expiryOptions)} ${num(leg.strike)} ${leg.type==='CE'?'Call':'Put'}`,
+      qty,
+      lots:leg.lots||1,
+      limitPrice:`₹${leg.price.toFixed(2)}`,
+      cashFlow:`${cash>=0?'+':'-'}₹${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(Math.abs(cash))}`,
+    }
+  })
+  const buyCount=legs.filter(leg=>leg.action==='BUY').length
+  const sellCount=legs.filter(leg=>leg.action==='SELL').length
+  const sequenceNote=sellCount?`Enter ${buyCount} BUY hedge/protection leg${buyCount===1?'':'s'} first, then ${sellCount} SELL income leg${sellCount===1?'':'s'}.`:`Enter the BUY leg${buyCount===1?'':'s'} as limit orders.`
+  return {...execution,rows,sequenceNote}
 }
 function breakevensFromPoints(points:any[]){const out:number[]=[];for(let i=1;i<points.length;i++){const a=points[i-1],b=points[i];if(a.expiry_pl===0)out.push(a.spot);else if(a.expiry_pl*b.expiry_pl<0)out.push(a.spot+(0-a.expiry_pl)*(b.spot-a.spot)/(b.expiry_pl-a.expiry_pl))}return out.slice(0,4)}
 function nearestPoint(points:any[],spot:number){return points.reduce((best,item)=>Math.abs(item.spot-spot)<Math.abs(best.spot-spot)?item:best,points[0])}
