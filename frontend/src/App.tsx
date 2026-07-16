@@ -71,6 +71,7 @@ function App() {
   useEffect(() => { refresh() }, [])
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('nifty-theme', theme) }, [theme])
   const currentNav = nav.find(n => n.id === page)
+  const bootstrapping = loading && prediction.model_version === 'not deployed'
 
   return <div className="shell">
     <aside className={mobile ? 'sidebar open' : 'sidebar'}>
@@ -92,16 +93,18 @@ function App() {
       </div><div className="header-actions"><button className="icon-btn" onClick={()=>setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle light/dark mode">{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button><DataBadge status={prediction.data_quality}/><button className="icon-btn" onClick={refresh} title="Refresh"><RefreshCw className={loading ? 'spin' : ''} size={17}/></button></div></header>
       {notice && <div className="notice"><AlertTriangle size={16}/><span>{notice}</span><button onClick={() => setNotice('')}><X size={15}/></button></div>}
       <div className="content">
-        {page === 'overview' && <Overview prediction={prediction} backtest={backtest} recentCalibration={recentCalibration}/>}
-        {page === 'strategy' && <StrategyTomorrow/>}
-        {page === 'flows' && <Flows/>}
-        {page === 'derivatives' && <Derivatives/>}
-        {page === 'options' && <Options prediction={prediction}/>} 
-        {page === 'backtest' && <BacktestPage data={backtest}/>} 
-        {page === 'calibration' && <Calibration data={backtest} recentCalibration={recentCalibration}/>}
-        {page === 'models' && <Models rows={models}/>} 
-        {page === 'methodology' && <MethodologyReport/>}
-        {page === 'admin' && <Admin onDone={refresh} models={models}/>} 
+        {bootstrapping ? <section className="panel wide"><Empty text="Refreshing verified market data, checking the deployed model, and preparing the latest prediction. On Render free tier this can take a minute after sleep or redeploy."/></section> : <>
+          {page === 'overview' && <Overview prediction={prediction} backtest={backtest} recentCalibration={recentCalibration}/>}
+          {page === 'strategy' && <StrategyTomorrow/>}
+          {page === 'flows' && <Flows/>}
+          {page === 'derivatives' && <Derivatives/>}
+          {page === 'options' && <Options prediction={prediction}/>} 
+          {page === 'backtest' && <BacktestPage data={backtest}/>} 
+          {page === 'calibration' && <Calibration data={backtest} recentCalibration={recentCalibration}/>}
+          {page === 'models' && <Models rows={models}/>} 
+          {page === 'methodology' && <MethodologyReport/>}
+          {page === 'admin' && <Admin onDone={refresh} models={models}/>} 
+        </>}
       </div>
     </main>
   </div>
@@ -180,7 +183,7 @@ function RecentReturnCalibrationChart({data,height}:{data:RecentCalibrationPoint
     <CartesianGrid stroke="#1b302c" vertical={false}/>
     <XAxis dataKey="next_trading_day" tickFormatter={shortDate} stroke="#66807a" minTickGap={18}/>
     <YAxis tickFormatter={(v)=>`${Number(v).toFixed(1)}%`} stroke="#66807a"/>
-    <Tooltip contentStyle={tip} labelFormatter={(v)=>`Trading day ${v}`} formatter={(v:any,name:any)=>[`${Number(v).toFixed(2)}%`, name === 'predicted_percent' ? 'Predicted expected return' : 'Actual Nifty return']}/>
+    <Tooltip contentStyle={tip} labelFormatter={(v)=>`Trading day ${v}`} formatter={(v:any,_name:any,item:any)=>[`${Number(v).toFixed(2)}%`, item?.dataKey === 'predicted_percent' ? 'Predicted expected return' : 'Actual Nifty return']}/>
     <ReferenceLine y={0} stroke="#829992"/>
     <Line dataKey="predicted_percent" name="Predicted expected return" stroke="#8fb5ff" strokeWidth={2.4} dot={{fill:'#8fb5ff',r:4}}/>
     <Line dataKey="actual_percent" name="Actual Nifty return" stroke="#51e6a6" strokeWidth={2.4} dot={{fill:'#51e6a6',r:4}}/>

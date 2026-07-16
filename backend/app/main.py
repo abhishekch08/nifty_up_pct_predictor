@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Thread
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,17 +8,31 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import router
 from .config import get_settings
-from .database import Base, engine
+from .database import Base, SessionLocal, engine
 from .scheduler import build_scheduler
+from .services import auto_refresh
 
 settings = get_settings()
 scheduler = None
+
+
+def _startup_refresh() -> None:
+    with SessionLocal() as db:
+        try:
+            result = auto_refresh(db)
+            print(f"STARTUP AUTO-REFRESH {result.get('status')} target={result.get('target_eod_date')} "
+                  f"market={result.get('latest_market_date')} prediction={result.get('latest_prediction_date')}",
+                  flush=True)
+        except Exception as exc:
+            print(f"STARTUP AUTO-REFRESH FAILED: {exc}", flush=True)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global scheduler
     Base.metadata.create_all(engine)
+    if settings.auto_refresh_enabled:
+        Thread(target=_startup_refresh, daemon=True).start()
     if settings.scheduler_enabled:
         scheduler = build_scheduler(); scheduler.start()
     yield
