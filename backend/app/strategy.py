@@ -13,7 +13,7 @@ from .data_sources import SYMBOLS
 from .models import MarketDaily, OptionEOD, Prediction
 from .services import serialize_prediction
 
-LOT_SIZE = 75
+LOT_SIZE = 65
 MAX_STRATEGY_EXPIRY_DAYS = 700
 
 

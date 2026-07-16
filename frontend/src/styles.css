@@ -65,5 +65,6 @@ html[data-theme='light'] .step-input input{background:#fff!important;color:#1c2b
 .groww-note span{display:block;margin-top:4px}
 html[data-theme=light] .groww-kpis div,html[data-theme=light] .groww-note{background:#f8fbff;border-color:#d7e0ea}
 html[data-theme=light] .groww-table td:nth-child(2),html[data-theme=light] .groww-note b{color:#1c2b33}
-@media(max-width:900px){.groww-kpis{grid-template-columns:1fr 1fr}.groww-table table{min-width:780px}}
+.groww-table table{min-width:1120px}
+@media(max-width:900px){.groww-kpis{grid-template-columns:1fr 1fr}.groww-table table{min-width:1120px}}
 @media(max-width:560px){.groww-kpis{grid-template-columns:1fr}}

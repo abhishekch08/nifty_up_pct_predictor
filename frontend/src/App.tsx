@@ -93,7 +93,10 @@ function App() {
       </div><div className="header-actions"><button className="icon-btn" onClick={()=>setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle light/dark mode">{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button><DataBadge status={prediction.data_quality}/><button className="icon-btn" onClick={refresh} title="Refresh"><RefreshCw className={loading ? 'spin' : ''} size={17}/></button></div></header>
       {notice && <div className="notice"><AlertTriangle size={16}/><span>{notice}</span><button onClick={() => setNotice('')}><X size={15}/></button></div>}
       <div className="content">
-        {bootstrapping ? <section className="panel wide"><Empty text="Refreshing verified market data, checking the deployed model, and preparing the latest prediction. On Render free tier this can take a minute after sleep or redeploy."/></section> : <>
+        {bootstrapping ? <>
+          <section className="panel wide"><Empty text="Refreshing verified market data, checking the deployed model, and preparing the latest prediction. On Render free tier this can take a minute after sleep or redeploy."/></section>
+          <Disclaimer/>
+        </> : <>
           {page === 'overview' && <Overview prediction={prediction} backtest={backtest} recentCalibration={recentCalibration}/>}
           {page === 'strategy' && <StrategyTomorrow/>}
           {page === 'flows' && <Flows/>}
@@ -286,7 +289,7 @@ function StrategyTomorrow() {
           <div><span>Breakeven</span><b>{summary.breakevens.length ? summary.breakevens.map(num).join(', ') : '—'}</b></div>
           <div><span>Reward / Risk</span><b>{summary.riskReward?`${summary.riskReward.toFixed(2)}x`:'—'}</b></div>
           <div><span>POP</span><b>{pct(summary.probabilityProfit)}</b></div>
-          <div><span>Funds & Margins <InfoTip text="Estimated funds for the complete multi-leg basket. It uses every buy and sell leg: total BUY premium, SELL premium credit, net debit/credit and capped max loss. Groww's final broker margin can differ, so treat this as a planning estimate."/></span><b>{money(summary.margin)}</b></div>
+          <div><span>Funds & Margins <InfoTip text="Estimated funds for the complete multi-leg basket. It sums the Groww-style Approx req for every BUY and SELL leg. BUY legs use premium plus a small charges buffer; SELL legs use a Nifty notional margin proxy plus premium and ITM buffer. Groww's final live margin can differ."/></span><b>{money(summary.margin)}</b></div>
         </div>
         <div className="panel payoff-panel sensi-card">
           <PanelTitle label="Strategy payoff workspace" note={`${selected.name} · ${currentExpiryOptions.find(x=>x.expiry===expiry)?.label || report.expiry}`} help="Sensibull-style payoff workspace for the strategy currently loaded in the ticket. The fixed recommendation below stays locked to the engine's best strategy; this workspace lets you inspect alternatives without rewriting the recommendation."/>
@@ -343,15 +346,16 @@ function GrowwOrderPanel({report,selected,legs,summary,expiryOptions}:{report:St
     </div>
     <div className="table-scroll groww-table">
       <table>
-        <thead><tr>{['#','Groww search / instrument','B/S','Product','Qty NSE','Lots','Limit price','Cash flow'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+        <thead><tr>{['#','Groww search / instrument','B/S','Product','Qty NSE','Lots','Limit price','Approx req','SL trigger','Target trigger'].map(h=><th key={h}>{h}</th>)}</tr></thead>
         <tbody>{plan.rows.map((row:any)=><tr key={row.sequence}>
-          <td>{row.sequence}</td><td>{row.instrument}</td><td><b className={row.action==='BUY'?'buy':'sell'}>{row.side}</b></td><td>{row.product}</td><td>{row.qty}</td><td>{row.lots}</td><td>{row.limitPrice}</td><td className={row.cashFlow.startsWith('+')?'green':'red'}>{row.cashFlow}</td>
+          <td>{row.sequence}</td><td>{row.instrument}</td><td><b className={row.action==='BUY'?'buy':'sell'}>{row.side}</b></td><td>{row.product}</td><td>{row.qty}</td><td>{row.lots}</td><td>{row.limitPrice}</td><td>{row.approxReq}</td><td>{row.stopLoss}</td><td>{row.targetTrigger}</td>
         </tr>)}</tbody>
       </table>
     </div>
     <div className="groww-note">
       <b>Order sequence:</b> {plan.sequenceNote}
-      <span> Estimated funds = max(capped max loss, total BUY premium, net debit). This is a basket planning estimate; Groww's live “Approx req.” is final because broker SPAN/exposure margin, hedge benefit, taxes and price movement update in real time.</span>
+      <span>Estimated funds = sum of the per-leg Groww-style Approx req. BUY legs use premium plus a small charges buffer; SELL legs use a Nifty notional margin proxy plus premium and ITM buffer. Groww's live “Approx req.” is final because broker SPAN/exposure margin, hedge benefit, taxes and price movement update in real time.</span>
+      <span>SL/TGT defaults are optional single-leg triggers. For defined-risk baskets, leaving leg-level SL/TGT blank and exiting the basket together is usually cleaner.</span>
     </div>
   </div>
 }
@@ -462,9 +466,9 @@ function estimateExecutionFunds(report:StrategyReport,legs:StrategyLeg[],maxLoss
   const sellPremium=legs.reduce((sum,leg)=>sum+(leg.action==='SELL'?leg.price*report.lot_size*(leg.lots||1):0),0)
   const netPremium=sellPremium-buyPremium
   const netDebit=Math.max(0,buyPremium-sellPremium)
-  const hasShort=legs.some(leg=>leg.action==='SELL')
-  const estimatedFunds=hasShort?Math.max(maxLoss,buyPremium,netDebit):buyPremium
-  return {buyPremium,sellPremium,netPremium,netDebit,estimatedFunds}
+  const perLegRequirement=legs.reduce((sum,leg)=>sum+growwApproxRequirement(report,leg),0)
+  const estimatedFunds=perLegRequirement || Math.max(maxLoss,buyPremium,netDebit)
+  return {buyPremium,sellPremium,netPremium,netDebit,estimatedFunds,perLegRequirement}
 }
 function buildGrowwPlan(report:StrategyReport,legs:StrategyLeg[],summary:any,expiryOptions:{expiry:string;label:string;days?:number}[]){
   const execution=summary.execution || estimateExecutionFunds(report,legs,summary.maxLoss||0)
@@ -472,6 +476,7 @@ function buildGrowwPlan(report:StrategyReport,legs:StrategyLeg[],summary:any,exp
   const rows=sequenced.map((leg,index)=>{
     const qty=report.lot_size*(leg.lots||1)
     const cash=(leg.action==='SELL'?1:-1)*leg.price*qty
+    const risk=growwTriggerDefaults(leg)
     return {
       sequence:index+1,
       action:leg.action,
@@ -482,12 +487,28 @@ function buildGrowwPlan(report:StrategyReport,legs:StrategyLeg[],summary:any,exp
       lots:leg.lots||1,
       limitPrice:`₹${leg.price.toFixed(2)}`,
       cashFlow:`${cash>=0?'+':'-'}₹${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(Math.abs(cash))}`,
+      approxReq: money(growwApproxRequirement(report,leg)),
+      stopLoss: risk.stopLoss,
+      targetTrigger: risk.target,
     }
   })
   const buyCount=legs.filter(leg=>leg.action==='BUY').length
   const sellCount=legs.filter(leg=>leg.action==='SELL').length
   const sequenceNote=sellCount?`Enter ${buyCount} BUY hedge/protection leg${buyCount===1?'':'s'} first, then ${sellCount} SELL income leg${sellCount===1?'':'s'}.`:`Enter the BUY leg${buyCount===1?'':'s'} as limit orders.`
   return {...execution,rows,sequenceNote}
+}
+function growwApproxRequirement(report:StrategyReport,leg:StrategyLeg){
+  const qty=report.lot_size*(leg.lots||1)
+  const premium=leg.price*qty
+  if(leg.action==='BUY') return Math.ceil(premium*1.006)
+  const notional=report.spot*qty
+  const baseMargin=notional*0.10517
+  const intrinsicBuffer=optionIntrinsic(leg,report.spot)*qty*0.314
+  return Math.ceil(baseMargin+premium+intrinsicBuffer)
+}
+function growwTriggerDefaults(leg:StrategyLeg){
+  if(leg.action==='BUY') return {stopLoss:`Optional ₹${(leg.price*.50).toFixed(2)}`, target:`Optional ₹${(leg.price*1.50).toFixed(2)}`}
+  return {stopLoss:`Optional ₹${(leg.price*1.50).toFixed(2)}`, target:`Optional ₹${(leg.price*.50).toFixed(2)}`}
 }
 function breakevensFromPoints(points:any[]){const out:number[]=[];for(let i=1;i<points.length;i++){const a=points[i-1],b=points[i];if(a.expiry_pl===0)out.push(a.spot);else if(a.expiry_pl*b.expiry_pl<0)out.push(a.spot+(0-a.expiry_pl)*(b.spot-a.spot)/(b.expiry_pl-a.expiry_pl))}return out.slice(0,4)}
 function nearestPoint(points:any[],spot:number){return points.reduce((best,item)=>Math.abs(item.spot-spot)<Math.abs(best.spot-spot)?item:best,points[0])}
