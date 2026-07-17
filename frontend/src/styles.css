@@ -68,3 +68,88 @@ html[data-theme=light] .groww-table td:nth-child(2),html[data-theme=light] .grow
 .groww-table table{min-width:1120px}
 @media(max-width:900px){.groww-kpis{grid-template-columns:1fr 1fr}.groww-table table{min-width:1120px}}
 @media(max-width:560px){.groww-kpis{grid-template-columns:1fr}}
+
+/* iOS Safari + mobile hardening. Keep desktop unchanged while making every panel, chart and table touch-safe. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden}
+body{overflow-x:hidden;-webkit-font-smoothing:antialiased;min-height:100vh;min-height:100dvh}
+button,input,select,textarea{-webkit-tap-highlight-color:rgba(81,230,166,.18)}
+button{touch-action:manipulation}
+.shell{min-height:100vh;min-height:100dvh}
+.sidebar{height:100vh;height:100dvh;padding-top:calc(24px + env(safe-area-inset-top));padding-bottom:calc(18px + env(safe-area-inset-bottom))}
+header{padding-top:env(safe-area-inset-top);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)}
+.content,.panel,.kpi,.strategy-left,.strategy-right{min-width:0;max-width:100%}
+.panel,.kpi{overflow-wrap:anywhere}
+.chart-scroll{width:100%;max-width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-y;padding-bottom:4px}
+.chart-inner{width:100%;height:auto}
+.chart-scroll .recharts-wrapper,.chart-scroll .recharts-surface{max-width:none;touch-action:pan-y}
+.table-scroll,.legs-table.editable,.groww-table{max-width:100%;overflow-x:auto!important;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+.info-tip{touch-action:manipulation;-webkit-user-select:none;user-select:none}
+.info-tip:focus{outline:2px solid #51e6a666;outline-offset:2px}
+.info-tip:active .info-bubble,.info-tip:focus-within .info-bubble{opacity:1;transform:translateY(0)}
+.payoff-tabs,.oi-legend{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.payoff-tabs button,.builder-buttons button,.ticket-actions button,.settings-pill,.icon-btn,.menu,.close-mobile{min-height:42px}
+.strategy-search,.settings-pill,.sensi-summary,.ready-head,.groww-kpis{max-width:100%}
+
+@media(max-width:780px){
+  body{font-size:15px!important}
+  main{width:100%;max-width:100vw;overflow-x:hidden}
+  header{height:auto;min-height:76px;padding:calc(8px + env(safe-area-inset-top)) 12px 10px;gap:10px;align-items:center}
+  header h1{font-size:17px;line-height:1.2}
+  .eyebrow{font-size:8px;letter-spacing:.8px}
+  .header-actions{gap:6px}
+  .icon-btn,.menu,.close-mobile{width:40px;height:40px;flex:0 0 40px}
+  .content{padding:14px 12px calc(44px + env(safe-area-inset-bottom))!important;width:100%;max-width:100vw}
+  .notice{padding:10px 12px;font-size:12px;align-items:flex-start}
+  .hero-grid,.two-col,.strategy-grid,.strategy-builder{grid-template-columns:1fr!important;gap:12px}
+  .panel,.kpi{padding:15px;border-radius:12px}
+  .panel-title{gap:12px;align-items:flex-start}
+  .panel-title>div{min-width:0}
+  .panel-title span{font-size:12px!important;line-height:1.25}
+  .panel-title small{font-size:11px!important;line-height:1.45}
+  .spot b{font-size:30px}
+  .gauge{height:138px}
+  .gauge b{font-size:29px}
+  .kpi-row{grid-template-columns:1fr!important}
+  .range-stats,.mini-grid,.calc-results,.strategy-kpis,.sensi-summary,.strategy-lower,.builder-strip,.builder-buttons{grid-template-columns:1fr!important}
+  .sensi-summary{display:grid!important;overflow:visible}
+  .sensi-summary>div{border-right:0!important;border-bottom:1px solid var(--line);padding:14px!important}
+  .sensi-summary>div:last-child{border-bottom:0}
+  .strategy-topbar{grid-template-columns:1fr!important}
+  .strategy-search{min-height:48px;flex-wrap:wrap}
+  .strategy-search em{margin-left:0;width:100%;font-size:10px}
+  .ticket-actions{margin:0 0 12px!important;justify-content:flex-start!important}
+  .legs-table.editable .legs-head,.legs-table.editable .leg-row{min-width:760px!important}
+  .legs-table.editable input,.legs-table.editable select,input,select,textarea{font-size:16px!important}
+  .step-input{grid-template-columns:38px minmax(96px,1fr) 38px!important}
+  .builder-strip{gap:12px}
+  .builder-strip>div{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .premium-readout{text-align:left!important}
+  .ready-head{align-items:flex-start;flex-direction:column}
+  .ready-head label{margin-left:0!important;width:100%;justify-content:space-between}
+  .ready-head select{width:100%;min-width:0!important}
+  .strategy-ready{grid-template-columns:1fr 1fr!important}
+  .strategy-mini{min-height:92px}
+  .groww-kpis{grid-template-columns:1fr 1fr!important}
+  .payoff-tabs{width:100%;display:flex;white-space:nowrap}
+  .payoff-tabs button{flex:0 0 auto;padding:9px 15px}
+  .booked-toggle{display:none!important}
+  .oi-legend{height:auto;min-height:48px;flex-wrap:nowrap;white-space:nowrap}
+  .target-pill{max-width:100%;white-space:normal;text-align:center;line-height:1.4}
+  .chart-scroll{margin-left:-6px;margin-right:-6px;padding-left:6px;padding-right:6px}
+  .chart-inner{width:max-content;max-width:none}
+  .info-bubble{position:fixed!important;left:14px!important;right:14px!important;top:auto!important;bottom:calc(14px + env(safe-area-inset-bottom))!important;width:auto!important;max-width:none!important;max-height:45vh;overflow:auto;-webkit-overflow-scrolling:touch;z-index:2000;font-size:12px!important;line-height:1.55;box-shadow:0 18px 70px #000d;pointer-events:auto}
+  .sidebar{width:min(86vw,300px);padding-left:calc(15px + env(safe-area-inset-left));box-shadow:18px 0 70px #000b}
+  .sidebar nav button{min-height:44px;font-size:13px}
+}
+
+@media(max-width:480px){
+  .strategy-ready{grid-template-columns:1fr!important}
+  .groww-kpis,.range-stats,.mini-grid,.calc-results{grid-template-columns:1fr!important}
+  .brand{padding-bottom:20px}
+  .header-actions .data-badge{display:none}
+  .panel-title{margin-bottom:12px}
+  .gauge{max-width:235px}
+  .factor{align-items:flex-start}
+  .factor em{margin-left:0}
+  .disclaimer{padding:13px}
+}
