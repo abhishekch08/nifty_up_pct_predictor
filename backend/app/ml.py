@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import erf, sqrt
 from pathlib import Path
 import json
 
@@ -21,6 +22,10 @@ from sklearn.preprocessing import RobustScaler
 
 TARGETS = {"target_next_day_up", "target_next_day_return"}
 NON_FEATURES = {"date", "symbol", "source", "available_at", "open", "high", "low", "close", "volume", "prev_close"}
+MIN_TRADABLE_RETURN_EDGE = 0.0020
+WEAK_TRADABLE_RETURN_EDGE = 0.0040
+STRONG_TRADABLE_RETURN_EDGE = 0.0075
+MIN_PROBABILITY_EDGE = 0.025
 
 
 def feature_columns(frame: pd.DataFrame) -> list[str]:
@@ -98,6 +103,17 @@ def walk_forward(frame: pd.DataFrame, min_train: int = 756, test_size: int = 63,
         "rmse_return": mean_squared_error(pred.target_next_day_return, pred.expected_return) ** 0.5,
         "samples": len(pred),
     }
+    for window in (20, 60, 126):
+        tail = pred.tail(min(window, len(pred)))
+        if len(tail):
+            errors = tail.target_next_day_return - tail.expected_return
+            signed = np.sign(tail.expected_return) == np.sign(tail.target_next_day_return)
+            active = tail.expected_return.abs() >= MIN_TRADABLE_RETURN_EDGE
+            metrics[f"recent_mae_return_{window}"] = float(np.abs(errors).mean())
+            metrics[f"recent_rmse_return_{window}"] = float((errors.pow(2).mean()) ** 0.5)
+            metrics[f"recent_direction_hit_{window}"] = float(signed.mean())
+            metrics[f"recent_tradeable_direction_hit_{window}"] = float(signed[active].mean()) if bool(active.any()) else 0.0
+            metrics[f"recent_no_edge_rate_{window}"] = float((tail.expected_return.abs() < MIN_TRADABLE_RETURN_EDGE).mean())
     bins = pd.cut(pred.probability_up, bins=np.linspace(0, 1, 11), include_lowest=True)
     calibration = []
     for bucket, group in pred.groupby(bins, observed=True):
@@ -121,13 +137,21 @@ def train_final(frame: pd.DataFrame, artifact_dir: str) -> tuple[str, dict, dict
     clf.fit(clean[cols], clean.target_next_day_up.astype(int))
     reg.fit(clean[cols], clean.target_next_day_return)
     return_bias = _return_bias(reg, clean, cols)
+    fitted = np.asarray(reg.predict(clean[cols]), dtype=float) + return_bias
+    residual = np.asarray(clean.target_next_day_return, dtype=float) - fitted
+    residual = residual[np.isfinite(residual)]
+    residual_quantiles = {
+        f"q{int(q * 100):02d}": float(np.quantile(residual, q)) if len(residual) else 0.0
+        for q in (0.05, 0.25, 0.50, 0.75, 0.95)
+    }
     version = "v" + datetime.now(timezone.utc).strftime("%Y.%m.%d.%H%M%S")
     artifact = {"classifier": clf, "regressor": reg, "features": cols, "trained_until": str(clean.date.iloc[-1]),
-                "return_bias": return_bias}
+                "return_bias": return_bias, "residual_quantiles": residual_quantiles}
     path = Path(artifact_dir) / f"{version}.joblib"
     joblib.dump(artifact, path)
-    meta = {"algorithm": "calibrated_logistic_plus_ridge_hgb_residual_bias", "feature_count": len(cols),
-            "artifact_path": str(path), "return_bias": return_bias}
+    meta = {"algorithm": "calibrated_logistic_plus_ridge_hgb_residual_bias_quantile_diagnostics",
+            "feature_count": len(cols), "artifact_path": str(path), "return_bias": return_bias,
+            "residual_quantiles": residual_quantiles}
     return version, artifact, meta
 
 
@@ -160,7 +184,7 @@ def load_model(path: str) -> dict:
 
 
 def signal_label(probability: float, expected_return: float, cost_bps: float = 3.0) -> str:
-    if expected_return <= cost_bps / 10_000 and 0.4 < probability < 0.6:
+    if abs(expected_return) < MIN_TRADABLE_RETURN_EDGE and 0.4 < probability < 0.6:
         return "Neutral / No Edge"
     if probability < 0.4:
         return "Strong Bearish"
@@ -171,6 +195,107 @@ def signal_label(probability: float, expected_return: float, cost_bps: float = 3
     if probability < 0.6:
         return "Mild Bullish"
     return "Strong Bullish"
+
+
+def edge_diagnostics(probability: float, expected_return: float, metrics: dict | None = None,
+                     completeness: float = 1.0, data_quality: str | None = None) -> dict:
+    """Separate a forecast from a tradeable edge.
+
+    The model can still publish a directional probability every day, but the
+    trading layer only allows direction when the expected move survives recent
+    error, probability and data-completeness gates.
+    """
+    metrics = metrics or {}
+    recent_error = float(metrics.get("recent_mae_return_20") or metrics.get("recent_mae_return_60")
+                         or metrics.get("mae_return") or 0.006)
+    recent_error = max(recent_error, 0.0008)
+    return_edge = abs(float(expected_return))
+    probability_edge = abs(float(probability) - 0.5)
+    signal_strength = return_edge / recent_error
+    expected_sign = 1 if expected_return > MIN_TRADABLE_RETURN_EDGE else -1 if expected_return < -MIN_TRADABLE_RETURN_EDGE else 0
+    probability_sign = 1 if probability > 0.5 + MIN_PROBABILITY_EDGE else -1 if probability < 0.5 - MIN_PROBABILITY_EDGE else 0
+    disagreement = expected_sign != 0 and probability_sign != 0 and expected_sign != probability_sign
+    reasons: list[str] = []
+    if return_edge < MIN_TRADABLE_RETURN_EDGE:
+        reasons.append("Expected return is below the minimum tradable edge.")
+    if probability_edge < MIN_PROBABILITY_EDGE:
+        reasons.append("Up/down probability is too close to 50/50.")
+    if signal_strength < 0.35:
+        reasons.append("Expected move is small versus recent model error.")
+    if completeness < 0.75:
+        reasons.append("Feature completeness is below the safe trading threshold.")
+    if disagreement:
+        reasons.append("Direction and magnitude models disagree.")
+
+    if completeness < 0.55 or str(data_quality or "").lower() == "unsafe":
+        edge_label, trade_action, position_size = "Unsafe / No Trade", "No Trade", 0.0
+    elif disagreement:
+        edge_label, trade_action, position_size = "Model Disagreement", "No Trade", 0.0
+    elif return_edge < MIN_TRADABLE_RETURN_EDGE or probability_edge < MIN_PROBABILITY_EDGE or signal_strength < 0.35:
+        edge_label, trade_action, position_size = "No Edge", "No Trade", 0.0
+    elif return_edge < WEAK_TRADABLE_RETURN_EDGE or signal_strength < 0.75:
+        edge_label, trade_action, position_size = "Weak Edge", "Neutral Only", 0.25
+    elif return_edge < STRONG_TRADABLE_RETURN_EDGE or signal_strength < 1.25:
+        edge_label, trade_action, position_size = "Tradable Edge", "Directional Allowed", 0.50
+    else:
+        edge_label, trade_action, position_size = "Strong Edge", "Directional Allowed", 1.00
+
+    if trade_action == "Directional Allowed":
+        bias = "Bullish" if expected_return > 0 and probability >= 0.5 else "Bearish" if expected_return < 0 and probability <= 0.5 else "Neutral"
+    elif trade_action == "Neutral Only":
+        bias = "Neutral"
+    else:
+        bias = "No Trade"
+    if not reasons:
+        reasons.append("Forecast edge survives minimum return, probability and recent-error gates.")
+    edge_score = float(np.clip(0.45 * min(signal_strength, 2.0) / 2.0 + 0.35 * min(probability_edge / 0.15, 1.0)
+                               + 0.20 * max(min((completeness - 0.55) / 0.45, 1.0), 0.0), 0.0, 1.0))
+    return {
+        "edge_label": edge_label,
+        "trade_action": trade_action,
+        "directional_bias": bias,
+        "signal_strength": float(signal_strength),
+        "recent_error": float(recent_error),
+        "return_edge": float(return_edge),
+        "probability_edge": float(probability_edge),
+        "edge_score": edge_score,
+        "position_size": position_size,
+        "tradeable": trade_action == "Directional Allowed",
+        "neutral_only": trade_action == "Neutral Only",
+        "no_trade": trade_action == "No Trade",
+        "reasons": reasons,
+    }
+
+
+def forecast_distribution(expected_return: float, sigma: float, metrics: dict | None = None,
+                          residual_quantiles: dict | None = None) -> dict:
+    metrics = metrics or {}
+    residual_quantiles = residual_quantiles or {}
+    empirical_error = float(metrics.get("recent_mae_return_20") or metrics.get("mae_return") or 0.006)
+    scale = max(float(sigma) * 0.65, empirical_error, 0.0015)
+    z_scores = {"q05": -1.64485, "q25": -0.67449, "q50": 0.0, "q75": 0.67449, "q95": 1.64485}
+    quantiles = {}
+    for key, score in z_scores.items():
+        quantiles[key] = float(expected_return + residual_quantiles.get(key, score * scale))
+    p_up = 1 - _normal_cdf((0 - expected_return) / scale)
+    return {
+        "median": float(quantiles["q50"]),
+        "q05": quantiles["q05"],
+        "q25": quantiles["q25"],
+        "q50": quantiles["q50"],
+        "q75": quantiles["q75"],
+        "q95": quantiles["q95"],
+        "p_up": float(p_up),
+        "p_large_up_50bps": float(1 - _normal_cdf((0.005 - expected_return) / scale)),
+        "p_large_down_50bps": float(_normal_cdf((-0.005 - expected_return) / scale)),
+        "p_tail_1pct": float(_normal_cdf((-0.01 - expected_return) / scale) + 1 - _normal_cdf((0.01 - expected_return) / scale)),
+        "scale": float(scale),
+        "note": "Empirical residual/volatility distribution for decision gating, not a guaranteed tight price band.",
+    }
+
+
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1 + erf(value / sqrt(2)))
 
 
 def explain_linear(artifact: dict, row: pd.DataFrame, top_n: int = 4) -> tuple[list[dict], list[dict]]:

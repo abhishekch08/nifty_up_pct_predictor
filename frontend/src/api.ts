@@ -16,12 +16,25 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export type Factor = { feature: string; value: number | null; impact?: number; interpretation: string }
+export type DecisionDiagnostics = {
+  edge_label: string; trade_action: string; directional_bias: string
+  signal_strength: number; recent_error: number; return_edge: number; probability_edge: number
+  edge_score: number; position_size: number; tradeable: boolean; neutral_only: boolean; no_trade: boolean
+  reasons: string[]
+}
+export type ForecastDistribution = {
+  median: number; q05: number; q25: number; q50: number; q75: number; q95: number
+  p_up: number; p_large_up_50bps: number; p_large_down_50bps: number; p_tail_1pct: number
+  scale: number; note: string
+}
 export type Prediction = {
   date: string; next_trading_day: string; nifty_close: number; india_vix: number | null
   probability_up: number; probability_down: number; expected_return: number
   expected_upper_range: number; expected_lower_range: number; signal: string; regime: string
   confidence: string; data_quality: string; data_completeness: number; model_version: string
   last_updated: string; top_bullish_factors: Factor[]; top_bearish_factors: Factor[]
+  decision?: DecisionDiagnostics; forecast_distribution?: ForecastDistribution
+  prediction_quality?: string; trade_action?: string; signal_strength?: number; recent_error?: number; position_size?: number
 }
 
 export type Backtest = {
@@ -44,11 +57,14 @@ export type StrategyCandidate = {
   max_profit: number; max_loss: number; risk_reward: number | null; expected_profit: number
   probability_profit: number; breakevens: number[]; score: number; unlimited_loss: boolean
   rationale: string; interpretation: string
+  return_on_risk?: number; worst_scenario_pl?: number; liquidity_score?: number
+  scenarios?: Record<string, number>; why_not?: string
 }
 export type StrategyReport = {
   status: string; warning?: string; disclaimer?: string; prediction?: Prediction; spot: number
   date: string; next_trading_day: string; expiry: string; lot_size: number
   expiries?: { expiry: string; label: string; days: number }[]
+  decision?: DecisionDiagnostics; market_view?: string; decision_notes?: string[]
   selected: StrategyCandidate; candidates: StrategyCandidate[]
   option_chain?: { expiry: string; strike: number; ce_ltp: number; pe_ltp: number; ce_oi: number; pe_oi: number; spot: number }[]
   oi_bars?: { strike: number; call_oi: number; put_oi: number; call_oi_lakh: number; put_oi_lakh: number }[]

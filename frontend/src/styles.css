@@ -69,6 +69,30 @@ html[data-theme=light] .groww-table td:nth-child(2),html[data-theme=light] .grow
 @media(max-width:900px){.groww-kpis{grid-template-columns:1fr 1fr}.groww-table table{min-width:1120px}}
 @media(max-width:560px){.groww-kpis{grid-template-columns:1fr}}
 
+/* Expert decision layer: separate forecasts from trades. */
+.decision-grid{display:grid;grid-template-columns:1.35fr repeat(3,1fr);gap:12px;margin:14px 0}
+.decision-card{padding:16px}
+.decision-card .panel-title{margin-bottom:10px}
+.decision-main{display:flex;align-items:end;justify-content:space-between;gap:12px;margin-bottom:10px}
+.decision-main b{font:600 20px DM Mono;color:var(--green)}
+.decision-main span{font:10px DM Mono;color:#dce9e5;text-transform:uppercase;border:1px solid var(--line);border-radius:14px;padding:5px 9px}
+.decision-card.blocked .decision-main b{color:var(--red)}
+.decision-card.neutral .decision-main b{color:var(--yellow)}
+.decision-card ul{margin:0;padding-left:18px;color:#9bb0aa;font-size:11px;line-height:1.55}
+.strategy-decision-panel{margin-bottom:14px}
+.decision-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px}
+.decision-summary-row div{border:1px solid var(--line);border-radius:8px;background:#091310;padding:11px}
+.decision-summary-row span{display:block;color:var(--muted);font:8px DM Mono;text-transform:uppercase;letter-spacing:.7px}
+.decision-summary-row b{display:block;margin-top:5px;font:500 15px DM Mono}
+.strategy-decision-panel p{margin:0;color:#9bb0aa;font-size:11px;line-height:1.6}
+.scenario-block{border:1px solid #243b35;background:#091310;border-radius:9px;margin-top:12px;padding:11px}
+.scenario-block>b{font-size:12px}
+.scenario-block .table-scroll{margin-top:8px}
+.scenario-block table{font-size:10px!important}
+html[data-theme=light] .decision-summary-row div,html[data-theme=light] .scenario-block{background:#f8fbff;border-color:#d7e0ea}
+@media(max-width:1100px){.decision-grid{grid-template-columns:1fr 1fr}.decision-card{grid-column:span 2}.decision-summary-row{grid-template-columns:1fr 1fr}}
+@media(max-width:620px){.decision-grid,.decision-summary-row{grid-template-columns:1fr}.decision-card{grid-column:auto}.decision-main{display:block}.decision-main span{display:inline-block;margin-top:8px}}
+
 /* iOS Safari + mobile hardening. Keep desktop unchanged while making every panel, chart and table touch-safe. */
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden}
 body{overflow-x:hidden;-webkit-font-smoothing:antialiased;min-height:100vh;min-height:100dvh}

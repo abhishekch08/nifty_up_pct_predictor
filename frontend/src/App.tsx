@@ -139,6 +139,7 @@ function Overview({prediction:p, backtest, recentCalibration}:{prediction:Predic
       <Kpi label="ROC-AUC" value={metric(backtest, 'roc_auc', 3)} sub="Discrimination" help="Ranking power of the probability score. AUC near 0.50 is no better than random; higher values mean positive days generally receive higher probabilities than negative days."/>
       <Kpi label="Backtest samples" value={backtest ? String(backtest.metrics.samples ?? '—') : '—'} sub="Out-of-sample days" help="Number of unseen historical days used to measure model performance. Low sample counts make accuracy and calibration less stable; this app requires at least one trading year before deployment eligibility."/>
     </section>
+    <DecisionStrip prediction={p}/>
     <section className="two-col">
       <div className="panel"><PanelTitle label="Signal drivers" note="One-feature perturbation attribution" help="Explains today's forecast locally. For each feature, the app removes that feature from the latest row and measures how much the probability changes; positive impacts are bullish drivers, negative impacts are bearish drivers."/><div className="factor-columns">
         <FactorList title="BULLISH" factors={p.top_bullish_factors} kind="up"/><FactorList title="BEARISH" factors={p.top_bearish_factors} kind="down"/>
@@ -193,6 +194,23 @@ function RecentReturnCalibrationChart({data,height}:{data:RecentCalibrationPoint
   </LineChart></ResponsiveContainer></ChartScroller>
 }
 
+function DecisionStrip({prediction:p}:{prediction:Prediction}) {
+  const d=p.decision
+  const dist=p.forecast_distribution
+  if(!d) return null
+  const qText=dist?`${signedPct(dist.q05)} to ${signedPct(dist.q95)}`:'Awaiting residual distribution'
+  return <section className="decision-grid">
+    <div className={`panel decision-card ${d.no_trade?'blocked':d.neutral_only?'neutral':'active'}`}>
+      <PanelTitle label="Trade decision layer" note={d.trade_action} help="This layer separates a model forecast from a trade. It checks expected return, probability edge, recent forecast error, data completeness and model disagreement before allowing a directional options strategy."/>
+      <div className="decision-main"><b>{d.edge_label}</b><span>{d.directional_bias}</span></div>
+      <ul>{d.reasons.slice(0,4).map(reason=><li key={reason}>{reason}</li>)}</ul>
+    </div>
+    <Kpi label="Edge strength" value={`${d.signal_strength.toFixed(2)}x`} sub="Expected move / recent MAE" help="A value near 0 means the expected move is tiny versus recent forecast error. Values above 1 mean the model's expected move is larger than its recent typical miss."/>
+    <Kpi label="Suggested size" value={`${Math.round(d.position_size*100)}%`} sub="Risk budget fraction" help="Capital discipline output. No Trade is 0%; Weak Edge is small/neutral only; Directional Allowed can use a larger, still capped-risk basket."/>
+    <Kpi label="Return distribution" value={qText} sub="5th to 95th percentile" help={dist?.note || 'Residual-aware forecast interval from the current model.'}/>
+  </section>
+}
+
 function StrategyTomorrow() {
   const [report,setReport]=useState<StrategyReport|null>(null)
   const [expiry,setExpiry]=useState('')
@@ -227,11 +245,12 @@ function StrategyTomorrow() {
   const payoff=buildStrategyPayoff(report, activeLegs)
   const summary=summarizeStrategy(report, selected, activeLegs, payoff)
   const chartData=attachOiBars(payoff.points, report.oi_bars||[])
-  const comparison=report.candidates.map(c=>({strategy:c.name, family:c.family, pop:c.probability_profit, expected_pl:c.expected_profit, max_profit:c.max_profit, max_loss:-c.max_loss, rr:c.risk_reward ?? 0}))
+  const comparison=report.candidates.map(c=>({strategy:c.name, family:c.family, pop:c.probability_profit, expected_pl:c.expected_profit, max_profit:c.max_profit, max_loss:-c.max_loss, rr:c.risk_reward ?? 0, why_not:c.why_not || ''}))
   const history=report.history.slice(0,14).map(h=>({date:h.date, suggested:h.strategy, prob_up:h.probability_up, nifty_return:h.nifty_return, estimated_pl:h.estimated_pl, outcome:h.outcome}))
   const expiryOptions=(report.expiries?.length ? report.expiries : [{expiry:report.expiry,label:report.expiry,days:0}])
     .filter(x=>x.days===undefined || x.days<=MAX_STRATEGY_EXPIRY_DAYS)
   const currentExpiryOptions=expiryOptions.length ? expiryOptions : [{expiry:report.expiry,label:report.expiry,days:0}]
+  const decision=report.decision || report.prediction?.decision
   const strikeStep=strikeStepFromChain(report.option_chain)||50
   const lotValue=activeLegs[0]?.lots || 1
   const updateLeg=(index:number, patch:Partial<StrategyLeg>)=>setLegs(prev=>prev.map((leg,i)=>{
@@ -246,6 +265,16 @@ function StrategyTomorrow() {
   const resetPrices=()=>setLegs(prev=>prev.map(leg=>({...leg,price:marketPrice(report,leg) ?? leg.price})))
   const clearStrategy=()=>setLegs([])
   return <>
+    {decision && <section className="panel strategy-decision-panel">
+      <PanelTitle label="Model-to-trade gate" note={report.market_view || decision.trade_action} help="This is the final control layer between the forecast and the suggested options basket. It prevents forcing a strategy on days when the forecast is too small, inconsistent, or weak relative to recent model error."/>
+      <div className="decision-summary-row">
+        <div><span>Decision</span><b>{decision.trade_action}</b></div>
+        <div><span>Bias</span><b>{decision.directional_bias}</b></div>
+        <div><span>Edge</span><b>{decision.edge_label}</b></div>
+        <div><span>Size guide</span><b>{Math.round(decision.position_size*100)}%</b></div>
+      </div>
+      <p>{(report.decision_notes || decision.reasons || []).join(' ')}</p>
+    </section>}
     <section className="strategy-builder">
       <div className="strategy-left">
         <div className="strategy-topbar">
@@ -320,6 +349,7 @@ function StrategyTomorrow() {
           <div><span>{recommendedSummary.premium>=0?'Credit received':'Debit paid'}</span><b>{money(Math.abs(recommendedSummary.premium))}</b></div>
         </div>
         <div className="rationale"><b>Reasoning</b><p>{recommended.rationale}</p><p>{recommended.interpretation}</p><p>Breakeven: {recommendedSummary.breakevens.length?recommendedSummary.breakevens.map(num).join(', '):'Not inside displayed range'}.</p>{loading&&<p>Refreshing expiry data…</p>}</div>
+        <ScenarioTable scenarios={recommended.scenarios}/>
       </div>
       <div className="panel selected-strategy">
         <div><span>Best strategy for tomorrow</span><h2>{recommended.name}</h2><p>{recommended.interpretation}</p></div>
@@ -327,11 +357,17 @@ function StrategyTomorrow() {
       </div>
     </section>
     <section className="two-col">
-      <div className="panel table-panel"><PanelTitle label="Strategy comparison" note="Capped-loss candidates ranked by score" help="Compares the shortlisted defined-risk strategies. Max loss is shown negative because it is the amount at risk. The final choice is not simply the largest payoff; it balances max loss, probability of profit, expected value and model direction."/><Table columns={['strategy','family','pop','expected_pl','max_profit','max_loss','rr']} rows={comparison}/></div>
+      <div className="panel table-panel"><PanelTitle label="Strategy comparison" note="Capped-loss candidates ranked by score" help="Compares the shortlisted defined-risk strategies. Max loss is shown negative because it is the amount at risk. The final choice is not simply the largest payoff; it balances max loss, probability of profit, expected value and model direction."/><Table columns={['strategy','family','pop','expected_pl','max_profit','max_loss','rr','why_not']} rows={comparison}/></div>
       <div className="panel table-panel"><PanelTitle label="Past results of suggested strategy" note="Last 14 replay observations" help="Historical replay uses prior saved predictions and actual next-day Nifty closes. When exact historical option premiums are unavailable, results are estimated with a consistent proxy spread model and should be read directionally."/><Table columns={['date','suggested','prob_up','nifty_return','estimated_pl','outcome']} rows={history}/></div>
     </section>
     <Disclaimer/>
   </>
+}
+
+function ScenarioTable({scenarios}:{scenarios?:Record<string,number>}) {
+  const rows=Object.entries(scenarios || {}).map(([scenario,pl])=>({scenario:scenario.replaceAll('_',' '), estimated_pl:pl}))
+  if(!rows.length) return null
+  return <div className="scenario-block"><b>Scenario P/L stress test</b><Table columns={['scenario','estimated_pl']} rows={rows}/></div>
 }
 
 function GrowwOrderPanel({report,selected,legs,summary,expiryOptions}:{report:StrategyReport;selected:StrategyCandidate;legs:StrategyLeg[];summary:any;expiryOptions:{expiry:string;label:string;days?:number}[]}) {
@@ -418,6 +454,7 @@ function strategyIconPaths(name:string) {
     'Iron Butterfly':[{d:'M8 36 L30 36',color:red},{d:'M30 36 L40 10',color:green},{d:'M40 10 L50 36',color:red},{d:'M50 36 L72 36',color:red}],
     'Long Straddle':[{d:'M8 12 L40 36',color:green},{d:'M40 36 L72 12',color:green}],
     'Long Strangle':[{d:'M8 12 L28 36',color:green},{d:'M28 36 L52 36',color:red},{d:'M52 36 L72 12',color:green}],
+    'No Trade':[{d:'M12 34 L68 34',color:red}],
   }
   return map[name] || [{d:'M8 34 L35 34 L72 15',color:green}]
 }
@@ -471,6 +508,9 @@ function estimateExecutionFunds(report:StrategyReport,legs:StrategyLeg[],maxLoss
   return {buyPremium,sellPremium,netPremium,netDebit,estimatedFunds,perLegRequirement}
 }
 function buildGrowwPlan(report:StrategyReport,legs:StrategyLeg[],summary:any,expiryOptions:{expiry:string;label:string;days?:number}[]){
+  if(!legs.length){
+    return {buyPremium:0,sellPremium:0,netPremium:0,netDebit:0,estimatedFunds:0,perLegRequirement:0,rows:[],sequenceNote:'No Groww orders are required because the model-to-trade gate selected No Trade.'}
+  }
   const execution=summary.execution || estimateExecutionFunds(report,legs,summary.maxLoss||0)
   const sequenced=[...legs].sort((a,b)=>a.action===b.action?Math.abs(a.strike-report.spot)-Math.abs(b.strike-report.spot):a.action==='BUY'?-1:1)
   const rows=sequenced.map((leg,index)=>{
@@ -750,7 +790,18 @@ function MethodologyReport() {
         <Formula label="Confidence" value="High if |p_t-0.50| >= 0.15 and completeness >= 0.90; Medium if edge >= 0.075; otherwise Low"/>
       </DocCard>
 
-      <DocCard title="13. Data quality and deployment gates" help="Why models/data can be Complete, Partial, Degraded, Unsafe, candidate, eligible or deployed.">
+      <DocCard title="13. Expert decision layer" help="How the model output becomes No Trade, Neutral Only or Directional Allowed.">
+        <p>The latest implementation deliberately separates forecast generation from trade permission. A forecast can be published every day, but the strategy engine trades only when the edge survives recent model error, probability, data-quality and disagreement gates.</p>
+        <Formula label="Return edge" value="edge_return = abs(expected_return)"/>
+        <Formula label="Probability edge" value="edge_prob = abs(P(up) - 0.50)"/>
+        <Formula label="Signal strength" value="strength = abs(expected_return) / recent_MAE_return"/>
+        <Formula label="No Trade" value="edge_return < 0.20%, or edge_prob < 2.5%, or strength is too small, or data is unsafe, or direction and return models disagree"/>
+        <Formula label="Neutral Only" value="weak edge: rank only range/neutral capped-risk strategies"/>
+        <Formula label="Directional Allowed" value="tradable edge: bullish/bearish structures may compete with neutral structures"/>
+        <p>The return distribution stores empirical residual quantiles q05/q25/q50/q75/q95 so the dashboard can show a realistic uncertainty envelope instead of pretending one-day returns can be tightly forecast.</p>
+      </DocCard>
+
+      <DocCard title="14. Data quality and deployment gates" help="Why models/data can be Complete, Partial, Degraded, Unsafe, candidate, eligible or deployed.">
         <Formula label="Completeness" value="q_t = non_missing_required_features / required_features"/>
         <Formula label="Quality bands" value="Complete >= 90%; Partial >= 75%; Degraded >= 55%; Unsafe < 55%"/>
         <Formula label="Gate 1" value="walk-forward accuracy > majority-class baseline"/>
@@ -759,7 +810,7 @@ function MethodologyReport() {
         <p>A trained model becomes live only after it passes these gates, unless an explicit force override is used.</p>
       </DocCard>
 
-      <DocCard title="14. Feature attribution" help="How bullish and bearish drivers are calculated.">
+      <DocCard title="15. Feature attribution" help="How bullish and bearish drivers are calculated.">
         <p>Driver lists are local explanations for today's row. They are not universal causal claims.</p>
         <Formula label="Base probability" value="p_base = model(X_latest)"/>
         <Formula label="Perturbed probability" value="p_without_j = model(X_latest with feature j set missing)"/>
@@ -767,7 +818,7 @@ function MethodologyReport() {
         <p>Positive impact means the feature supports the up-probability today; negative impact means it pulls the forecast lower.</p>
       </DocCard>
 
-      <DocCard title="15. Assumptions and limitations" help="Research caveats that keep the output from being over-interpreted.">
+      <DocCard title="16. Assumptions and limitations" help="Research caveats that keep the output from being over-interpreted.">
         <ul>
           <li>The model cannot foresee overnight news, policy shocks, geopolitical events, liquidity accidents or exchange rule changes.</li>
           <li>Walk-forward results are out-of-sample but still historical; market relationships can decay.</li>

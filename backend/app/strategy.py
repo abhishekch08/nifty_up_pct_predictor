@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .data_sources import SYMBOLS
-from .models import MarketDaily, OptionEOD, Prediction
+from .ml import edge_diagnostics
+from .models import MarketDaily, ModelVersion, OptionEOD, Prediction
 from .services import serialize_prediction
 
 LOT_SIZE = 65
@@ -38,12 +39,21 @@ def strategy_report(db: Session, expiry: date | None = None) -> dict:
     if len(chain) < 4:
         return {"status": "unavailable", "warning": "Not enough option strikes to rank defined-risk strategies."}
 
-    candidates = _rank_candidates(prediction, chain)
-    selected = candidates[0] if candidates else None
+    model = db.get(ModelVersion, prediction.model_version)
+    decision = edge_diagnostics(prediction.probability_up, prediction.expected_return,
+                                model.metrics if model else None, prediction.completeness, prediction.data_quality)
+    candidates = _rank_candidates(prediction, chain, decision)
+    selected = _select_strategy(prediction, chain, candidates, decision)
+    display_candidates = [_no_trade_candidate(prediction, chain, decision)] + candidates if decision["no_trade"] else candidates
+    for item in display_candidates:
+        item["why_not"] = _why_not(item, selected, decision)
     return {
         "status": "complete" if selected else "unavailable",
         "disclaimer": "Research output only. All listed option structures have capped maximum loss, but live execution, slippage, tax, brokerage and margin can differ.",
-        "prediction": serialize_prediction(prediction),
+        "prediction": serialize_prediction(prediction, model.metrics if model else None),
+        "decision": decision,
+        "market_view": _market_view(prediction, decision),
+        "decision_notes": decision["reasons"],
         "spot": prediction.nifty_close,
         "date": prediction.date.isoformat(),
         "next_trading_day": prediction.next_trading_day.isoformat(),
@@ -51,7 +61,7 @@ def strategy_report(db: Session, expiry: date | None = None) -> dict:
         "expiries": expiry_options,
         "lot_size": LOT_SIZE,
         "selected": selected,
-        "candidates": candidates[:8],
+        "candidates": display_candidates[:9],
         "option_chain": _option_chain_payload(chain),
         "oi_bars": _oi_bars(chain),
         "payoff_points": _payoff_points(selected, prediction) if selected else [],
@@ -140,7 +150,19 @@ def _oi_bars(chain: list[dict]) -> list[dict]:
     } for item in chain if item["ce_oi"] or item["pe_oi"]]
 
 
-def _rank_candidates(prediction: Prediction, chain: list[dict]) -> list[dict]:
+def _select_strategy(prediction: Prediction, chain: list[dict], candidates: list[dict], decision: dict) -> dict | None:
+    if decision.get("no_trade"):
+        return _no_trade_candidate(prediction, chain, decision)
+    if not candidates:
+        return None
+    if decision.get("neutral_only"):
+        neutral = [item for item in candidates if item["family"] == "Neutral"]
+        if neutral:
+            return neutral[0]
+    return candidates[0]
+
+
+def _rank_candidates(prediction: Prediction, chain: list[dict], decision: dict) -> list[dict]:
     strikes = [item["strike"] for item in chain]
     spot = float(prediction.nifty_close)
     atm = min(strikes, key=lambda strike: abs(strike - spot))
@@ -174,13 +196,14 @@ def _rank_candidates(prediction: Prediction, chain: list[dict]) -> list[dict]:
         ("Long Strangle", "Volatility", [leg("BUY", "PE", lower), leg("BUY", "CE", upper)],
          "Cheaper capped-loss long-volatility strategy than a straddle; needs a larger move beyond the wings to profit."),
     ]
-    evaluated = [_evaluate(name, family, legs, prediction, chain, rationale) for name, family, legs, rationale in raw]
+    evaluated = [_evaluate(name, family, legs, prediction, chain, rationale, decision) for name, family, legs, rationale in raw]
     evaluated = [item for item in evaluated if item["max_loss"] and item["max_loss"] > 0 and item["unlimited_loss"] is False]
     evaluated.sort(key=lambda item: item["score"], reverse=True)
     return evaluated
 
 
-def _evaluate(name: str, family: str, legs: list[Leg], prediction: Prediction, chain: list[dict], rationale: str) -> dict:
+def _evaluate(name: str, family: str, legs: list[Leg], prediction: Prediction, chain: list[dict], rationale: str,
+              decision: dict) -> dict:
     spot = float(prediction.nifty_close)
     sigma = _forecast_sigma(prediction)
     grid = np.linspace(max(1, spot * (1 - 4 * sigma)), spot * (1 + 4 * sigma), 241)
@@ -193,16 +216,27 @@ def _evaluate(name: str, family: str, legs: list[Leg], prediction: Prediction, c
     pop = float(weights[payoffs > 0].sum())
     breakevens = _breakevens(grid, payoffs)
     rr = max_profit / max_loss if max_loss > 0 and isfinite(max_profit) else None
-    directional_alignment = _alignment_bonus(family, prediction)
+    scenarios = _scenario_pl(legs, prediction)
+    worst_scenario = min(scenarios.values()) if scenarios else expected_profit
+    return_on_risk = expected_profit / max_loss if max_loss else -99
+    liquidity_score = _liquidity_score(legs, chain)
+    directional_alignment = _alignment_bonus(family, prediction, decision)
     reward_quality = log1p(rr or 0)
     payoff_capacity = max_profit / (max_profit + max_loss) if max_profit > 0 and max_loss > 0 else 0
     score = (
-        (expected_profit / max_loss if max_loss else -99)
+        return_on_risk
         + 0.30 * pop
         + 0.18 * reward_quality
         + 0.08 * payoff_capacity
+        + 0.08 * liquidity_score
         + directional_alignment
     )
+    if worst_scenario < 0 and max_loss:
+        score -= 0.15 * min(abs(worst_scenario) / max_loss, 1.0)
+    if decision.get("neutral_only") and family in {"Bullish", "Bearish"}:
+        score -= 0.55
+    if decision.get("no_trade"):
+        score -= 1.25
     credit = sum((leg.price if leg.action == "SELL" else -leg.price) for leg in legs) * LOT_SIZE
     return {
         "name": name,
@@ -217,9 +251,39 @@ def _evaluate(name: str, family: str, legs: list[Leg], prediction: Prediction, c
         "probability_profit": pop,
         "breakevens": breakevens,
         "score": score,
+        "return_on_risk": return_on_risk,
+        "worst_scenario_pl": worst_scenario,
+        "liquidity_score": liquidity_score,
+        "scenarios": scenarios,
         "unlimited_loss": False,
         "rationale": rationale,
         "interpretation": _interpretation(name, prediction, expected_profit, pop, rr),
+    }
+
+
+def _no_trade_candidate(prediction: Prediction, chain: list[dict], decision: dict) -> dict:
+    expiry = chain[0]["expiry"].isoformat() if chain else prediction.next_trading_day.isoformat()
+    return {
+        "name": "No Trade",
+        "family": "No Trade",
+        "legs": [],
+        "premium": 0.0,
+        "premium_label": "No order",
+        "max_profit": 0.0,
+        "max_loss": 0.0,
+        "risk_reward": None,
+        "expected_profit": 0.0,
+        "probability_profit": 0.0,
+        "breakevens": [],
+        "score": 999.0,
+        "return_on_risk": 0.0,
+        "worst_scenario_pl": 0.0,
+        "liquidity_score": 0.0,
+        "scenarios": {"flat": 0.0, "model_target": 0.0, "lower_range": 0.0, "upper_range": 0.0},
+        "unlimited_loss": False,
+        "rationale": "No-trade gate is active: the forecast is not strong enough versus recent model error, data quality, or directional agreement.",
+        "interpretation": f"Selected because the decision layer says {decision.get('edge_label', 'No Edge')}. Preserve capital and wait for a cleaner setup before entering a new options basket.",
+        "expiry": expiry,
     }
 
 
@@ -243,21 +307,26 @@ def _payoff_points(strategy: dict | None, prediction: Prediction) -> list[dict]:
 def _historical_proxy_result(row: Prediction, next_close: float) -> dict:
     close = float(row.nifty_close)
     width = max(100.0, round(close * 0.008 / 50) * 50)
-    strategy = "Iron Condor"
-    if row.probability_up >= 0.60:
-        strategy = "Bull Call Spread"
-    elif row.probability_up >= 0.525:
-        strategy = "Bull Put Spread"
-    elif row.probability_up <= 0.40:
-        strategy = "Bear Put Spread"
-    elif row.probability_up <= 0.475:
-        strategy = "Bear Call Spread"
-    result = _proxy_payoff(strategy, close, next_close, width) * LOT_SIZE
+    decision = edge_diagnostics(row.probability_up, row.expected_return, None, row.completeness, row.data_quality)
+    if decision["no_trade"]:
+        strategy = "No Trade"
+        result = 0.0
+    elif decision["neutral_only"]:
+        strategy = "Iron Condor"
+        result = _proxy_payoff(strategy, close, next_close, width) * LOT_SIZE
+    else:
+        strategy = "Iron Condor"
+        if row.expected_return > 0 and row.probability_up >= 0.55:
+            strategy = "Bull Call Spread" if abs(row.expected_return) >= 0.004 else "Bull Put Spread"
+        elif row.expected_return < 0 and row.probability_up <= 0.45:
+            strategy = "Bear Put Spread" if abs(row.expected_return) >= 0.004 else "Bear Call Spread"
+        result = _proxy_payoff(strategy, close, next_close, width) * LOT_SIZE
     return {
         "date": row.date.isoformat(),
         "next_trading_day": row.next_trading_day.isoformat(),
         "strategy": strategy,
         "probability_up": row.probability_up,
+        "trade_action": decision["trade_action"],
         "entry_close": close,
         "exit_close": next_close,
         "nifty_return": next_close / close - 1,
@@ -315,11 +384,41 @@ def _breakevens(grid: np.ndarray, payoffs: np.ndarray) -> list[float]:
     return [round(x, 2) for x in levels[:4]]
 
 
-def _alignment_bonus(family: str, prediction: Prediction) -> float:
+def _scenario_pl(legs: list[Leg], prediction: Prediction) -> dict[str, float]:
+    spot = float(prediction.nifty_close)
+    levels = {
+        "flat": spot,
+        "model_target": spot * (1 + float(prediction.expected_return or 0)),
+        "lower_range": float(prediction.expected_lower_range or spot),
+        "upper_range": float(prediction.expected_upper_range or spot),
+        "down_1pct": spot * 0.99,
+        "up_1pct": spot * 1.01,
+    }
+    return {name: float(_strategy_payoff(legs, value) * LOT_SIZE) for name, value in levels.items()}
+
+
+def _liquidity_score(legs: list[Leg], chain: list[dict]) -> float:
+    max_oi = max([item.get("ce_oi", 0) for item in chain] + [item.get("pe_oi", 0) for item in chain] + [1])
+    scores = []
+    for leg in legs:
+        item = _row(chain, leg.strike)
+        oi = item["ce_oi"] if leg.option_type == "CE" else item["pe_oi"]
+        scores.append(log1p(max(oi, 0)) / log1p(max_oi))
+    return float(np.mean(scores)) if scores else 0.0
+
+
+def _alignment_bonus(family: str, prediction: Prediction, decision: dict) -> float:
     probability_up = prediction.probability_up
     expected_return = prediction.expected_return
     abs_move = abs(expected_return)
     small_move = abs_move < 0.0025
+    bias = decision.get("directional_bias")
+    if bias == "Bullish" and family == "Bearish":
+        return -0.80
+    if bias == "Bearish" and family == "Bullish":
+        return -0.80
+    if bias == "No Trade":
+        return -0.25
     if family == "Bullish":
         return max(0, probability_up - 0.50) + (0.12 if expected_return > 0.0015 else -0.18 if expected_return < -0.0015 else 0)
     if family == "Bearish":
@@ -333,6 +432,33 @@ def _interpretation(name: str, prediction: Prediction, ev: float, pop: float, rr
     direction = "bullish" if prediction.probability_up > 0.55 else "bearish" if prediction.probability_up < 0.45 else "range-bound"
     rr_text = f"{rr:.2f}x reward/risk" if rr else "open-ended reward on the displayed range"
     return f"Selected/ranked for a {direction} model backdrop, expected P/L of {ev:,.0f} per lot, {pop:.1%} probability of profit, and {rr_text} with capped loss."
+
+
+def _market_view(prediction: Prediction, decision: dict) -> str:
+    expected = prediction.expected_return
+    direction = "up" if expected > 0 else "down" if expected < 0 else "flat"
+    return (
+        f"{decision['trade_action']}: model expects {direction} {abs(expected):.2%}; "
+        f"edge strength {decision['signal_strength']:.2f}x recent error; "
+        f"bias {decision['directional_bias']}."
+    )
+
+
+def _why_not(candidate: dict, selected: dict | None, decision: dict) -> str:
+    if selected and candidate["name"] == selected["name"]:
+        return "Selected by the active decision gate."
+    if selected and selected["name"] == "No Trade":
+        return "Rejected because the no-trade gate is active."
+    if decision.get("neutral_only") and candidate["family"] in {"Bullish", "Bearish"}:
+        return "Rejected because only neutral/range strategies are allowed for this weak-edge forecast."
+    if selected:
+        if candidate.get("expected_profit", 0) < selected.get("expected_profit", 0):
+            return "Lower expected P/L after probability weighting."
+        if candidate.get("worst_scenario_pl", 0) < selected.get("worst_scenario_pl", 0):
+            return "Worse stress-scenario P/L."
+        if candidate.get("score", 0) < selected.get("score", 0):
+            return "Lower combined risk-adjusted score."
+    return "Ranked below the selected capped-loss candidate."
 
 
 def _leg_dict(leg: Leg, expiry) -> dict:

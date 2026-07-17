@@ -55,13 +55,26 @@ def latest_prediction(db: Session = Depends(get_db)) -> dict:
     row = db.scalar(select(Prediction).order_by(Prediction.created_at.desc()))
     if not row:
         raise HTTPException(404, "No prediction available. Fetch data, retrain, and deploy a model.")
-    return serialize_prediction(row)
+    metrics, artifact = _prediction_model_context(db, row)
+    return serialize_prediction(row, metrics, artifact)
 
 
 @router.get("/predictions/history")
 def prediction_history(limit: int = Query(default=90, ge=1, le=1000), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(Prediction).order_by(Prediction.date.desc()).limit(limit)).all()
-    return [serialize_prediction(row) for row in rows]
+    return [serialize_prediction(row, *_prediction_model_context(db, row)) for row in rows]
+
+
+def _prediction_model_context(db: Session, row: Prediction) -> tuple[dict | None, dict | None]:
+    model = db.get(ModelVersion, row.model_version)
+    if not model:
+        return None, None
+    artifact = None
+    try:
+        artifact = load_model(model.artifact_path)
+    except Exception:
+        artifact = None
+    return model.metrics, artifact
 
 
 @router.get("/data-status")

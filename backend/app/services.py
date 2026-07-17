@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .data_sources import NSEOfficialSource, SYMBOLS, YahooChartSource, validate_frame
 from .features import build_feature_frame, classify_regime
-from .ml import explain_linear, load_model, predict_returns, signal_label, train_final, walk_forward
+from .ml import (edge_diagnostics, explain_linear, forecast_distribution, load_model, predict_returns,
+                 signal_label, train_final, walk_forward)
 from .models import (BacktestResult, DataQualityLog, FlowDaily, MarketBreadth,
                      MarketDaily, ModelVersion, OptionEOD, ParticipantOI, Prediction)
 
@@ -363,7 +364,8 @@ def retrain(db: Session) -> dict:
                         training_end=clean.date.iloc[-1], feature_set_version="v1", calibration_method="platt_sigmoid",
                         hyperparameters={"classifier_C": 0.25, "ridge_alpha": 5.0, "hgb_max_iter": 180,
                                          "hgb_learning_rate": 0.04, "hgb_max_leaf_nodes": 15,
-                                         "return_bias": meta.get("return_bias", 0.0)}, metrics=metrics,
+                                         "return_bias": meta.get("return_bias", 0.0),
+                                         "residual_quantiles": meta.get("residual_quantiles", {})}, metrics=metrics,
                         artifact_path=meta["artifact_path"], status=status))
     equity = _equity_curve(result.predictions)
     db.add(BacktestResult(model_version=version, start_date=result.predictions.date.iloc[0],
@@ -417,7 +419,7 @@ def generate_prediction(db: Session, model: ModelVersion | None = None) -> dict:
     db.add(entity)
     db.commit()
     db.refresh(entity)
-    return serialize_prediction(entity)
+    return serialize_prediction(entity, model.metrics, artifact)
 
 
 def parse_upload(dataset: str, content: bytes, db: Session) -> dict:
@@ -503,7 +505,12 @@ def parse_upload(dataset: str, content: bytes, db: Session) -> dict:
     return {"dataset": dataset, "rows": count, "columns": list(frame.columns), "preview": frame.head(5).replace({np.nan: None}).to_dict("records")}
 
 
-def serialize_prediction(row: Prediction) -> dict:
+def serialize_prediction(row: Prediction, metrics: dict | None = None, artifact: dict | None = None) -> dict:
+    close = float(row.nifty_close or 0)
+    range_sigma = abs(float(row.expected_upper_range or 0) - float(row.expected_lower_range or 0)) / (2 * close) if close else 0.006
+    decision = edge_diagnostics(row.probability_up, row.expected_return, metrics, row.completeness, row.data_quality)
+    distribution = forecast_distribution(row.expected_return, range_sigma, metrics,
+                                         (artifact or {}).get("residual_quantiles", {}))
     return {"date": row.date.isoformat(), "next_trading_day": row.next_trading_day.isoformat(),
             "nifty_close": row.nifty_close, "india_vix": row.india_vix,
             "probability_up": row.probability_up, "probability_down": row.probability_down,
@@ -511,7 +518,11 @@ def serialize_prediction(row: Prediction) -> dict:
             "expected_lower_range": row.expected_lower_range, "signal": row.signal, "regime": row.regime,
             "confidence": row.confidence, "data_quality": row.data_quality, "data_completeness": row.completeness,
             "top_bullish_factors": row.bullish_factors, "top_bearish_factors": row.bearish_factors,
-            "model_version": row.model_version, "last_updated": row.created_at.isoformat()}
+            "model_version": row.model_version, "last_updated": row.created_at.isoformat(),
+            "decision": decision, "forecast_distribution": distribution,
+            "prediction_quality": decision["edge_label"], "trade_action": decision["trade_action"],
+            "signal_strength": decision["signal_strength"], "recent_error": decision["recent_error"],
+            "position_size": decision["position_size"]}
 
 
 def _equity_curve(pred: pd.DataFrame) -> list[dict]:
