@@ -38,7 +38,7 @@ def test_strategy_report_ranks_only_capped_loss_structures(tmp_path):
     assert report["payoff_points"]
 
 
-def test_strategy_report_can_select_no_trade_for_tiny_edge(tmp_path):
+def test_strategy_report_always_selects_real_strategy_for_tiny_edge(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path/'strategy.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -63,5 +63,8 @@ def test_strategy_report_can_select_no_trade_for_tiny_edge(tmp_path):
         report = strategy_report(db)
 
     assert report["status"] == "complete"
-    assert report["selected"]["name"] == "No Trade"
-    assert report["decision"]["no_trade"] is True
+    assert report["selected"]["name"] != "No Trade"
+    assert report["selected"]["legs"]
+    assert report["selected"]["max_loss"] > 0
+    assert report["decision"]["no_trade"] is False
+    assert report["decision"]["trade_action"] == "Best Available / Neutral Bias"

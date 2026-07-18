@@ -42,18 +42,19 @@ def strategy_report(db: Session, expiry: date | None = None) -> dict:
     model = db.get(ModelVersion, prediction.model_version)
     decision = edge_diagnostics(prediction.probability_up, prediction.expected_return,
                                 model.metrics if model else None, prediction.completeness, prediction.data_quality)
-    candidates = _rank_candidates(prediction, chain, decision)
-    selected = _select_strategy(prediction, chain, candidates, decision)
-    display_candidates = [_no_trade_candidate(prediction, chain, decision)] + candidates if decision["no_trade"] else candidates
+    strategy_decision = _force_best_strategy_decision(decision, prediction)
+    candidates = _rank_candidates(prediction, chain, strategy_decision)
+    selected = _select_strategy(prediction, chain, candidates, strategy_decision)
+    display_candidates = candidates
     for item in display_candidates:
-        item["why_not"] = _why_not(item, selected, decision)
+        item["why_not"] = _why_not(item, selected, strategy_decision)
     return {
         "status": "complete" if selected else "unavailable",
         "disclaimer": "Research output only. All listed option structures have capped maximum loss, but live execution, slippage, tax, brokerage and margin can differ.",
         "prediction": serialize_prediction(prediction, model.metrics if model else None),
-        "decision": decision,
-        "market_view": _market_view(prediction, decision),
-        "decision_notes": decision["reasons"],
+        "decision": strategy_decision,
+        "market_view": _market_view(prediction, strategy_decision),
+        "decision_notes": strategy_decision["reasons"],
         "spot": prediction.nifty_close,
         "date": prediction.date.isoformat(),
         "next_trading_day": prediction.next_trading_day.isoformat(),
@@ -151,8 +152,6 @@ def _oi_bars(chain: list[dict]) -> list[dict]:
 
 
 def _select_strategy(prediction: Prediction, chain: list[dict], candidates: list[dict], decision: dict) -> dict | None:
-    if decision.get("no_trade"):
-        return _no_trade_candidate(prediction, chain, decision)
     if not candidates:
         return None
     if decision.get("neutral_only"):
@@ -235,8 +234,6 @@ def _evaluate(name: str, family: str, legs: list[Leg], prediction: Prediction, c
         score -= 0.15 * min(abs(worst_scenario) / max_loss, 1.0)
     if decision.get("neutral_only") and family in {"Bullish", "Bearish"}:
         score -= 0.55
-    if decision.get("no_trade"):
-        score -= 1.25
     credit = sum((leg.price if leg.action == "SELL" else -leg.price) for leg in legs) * LOT_SIZE
     return {
         "name": name,
@@ -261,32 +258,6 @@ def _evaluate(name: str, family: str, legs: list[Leg], prediction: Prediction, c
     }
 
 
-def _no_trade_candidate(prediction: Prediction, chain: list[dict], decision: dict) -> dict:
-    expiry = chain[0]["expiry"].isoformat() if chain else prediction.next_trading_day.isoformat()
-    return {
-        "name": "No Trade",
-        "family": "No Trade",
-        "legs": [],
-        "premium": 0.0,
-        "premium_label": "No order",
-        "max_profit": 0.0,
-        "max_loss": 0.0,
-        "risk_reward": None,
-        "expected_profit": 0.0,
-        "probability_profit": 0.0,
-        "breakevens": [],
-        "score": 999.0,
-        "return_on_risk": 0.0,
-        "worst_scenario_pl": 0.0,
-        "liquidity_score": 0.0,
-        "scenarios": {"flat": 0.0, "model_target": 0.0, "lower_range": 0.0, "upper_range": 0.0},
-        "unlimited_loss": False,
-        "rationale": "No-trade gate is active: the forecast is not strong enough versus recent model error, data quality, or directional agreement.",
-        "interpretation": f"Selected because the decision layer says {decision.get('edge_label', 'No Edge')}. Preserve capital and wait for a cleaner setup before entering a new options basket.",
-        "expiry": expiry,
-    }
-
-
 def _payoff_points(strategy: dict | None, prediction: Prediction) -> list[dict]:
     if not strategy:
         return []
@@ -307,11 +278,11 @@ def _payoff_points(strategy: dict | None, prediction: Prediction) -> list[dict]:
 def _historical_proxy_result(row: Prediction, next_close: float) -> dict:
     close = float(row.nifty_close)
     width = max(100.0, round(close * 0.008 / 50) * 50)
-    decision = edge_diagnostics(row.probability_up, row.expected_return, None, row.completeness, row.data_quality)
-    if decision["no_trade"]:
-        strategy = "No Trade"
-        result = 0.0
-    elif decision["neutral_only"]:
+    decision = _force_best_strategy_decision(
+        edge_diagnostics(row.probability_up, row.expected_return, None, row.completeness, row.data_quality),
+        row,
+    )
+    if decision["neutral_only"]:
         strategy = "Iron Condor"
         result = _proxy_payoff(strategy, close, next_close, width) * LOT_SIZE
     else:
@@ -417,8 +388,6 @@ def _alignment_bonus(family: str, prediction: Prediction, decision: dict) -> flo
         return -0.80
     if bias == "Bearish" and family == "Bullish":
         return -0.80
-    if bias == "No Trade":
-        return -0.25
     if family == "Bullish":
         return max(0, probability_up - 0.50) + (0.12 if expected_return > 0.0015 else -0.18 if expected_return < -0.0015 else 0)
     if family == "Bearish":
@@ -447,8 +416,6 @@ def _market_view(prediction: Prediction, decision: dict) -> str:
 def _why_not(candidate: dict, selected: dict | None, decision: dict) -> str:
     if selected and candidate["name"] == selected["name"]:
         return "Selected by the active decision gate."
-    if selected and selected["name"] == "No Trade":
-        return "Rejected because the no-trade gate is active."
     if decision.get("neutral_only") and candidate["family"] in {"Bullish", "Bearish"}:
         return "Rejected because only neutral/range strategies are allowed for this weak-edge forecast."
     if selected:
@@ -459,6 +426,46 @@ def _why_not(candidate: dict, selected: dict | None, decision: dict) -> str:
         if candidate.get("score", 0) < selected.get("score", 0):
             return "Lower combined risk-adjusted score."
     return "Ranked below the selected capped-loss candidate."
+
+
+def _force_best_strategy_decision(decision: dict, prediction: Prediction) -> dict:
+    """Keep diagnostics, but never let a weak-edge gate suppress strategy selection.
+
+    The model can still say the setup is weak/unsafe/low-confidence, but the
+    Strategy for Tomorrow product promise is to always rank a real capped-loss
+    options structure.
+    """
+    if not decision.get("no_trade"):
+        return decision
+    forced = dict(decision)
+    forced["original_trade_action"] = decision.get("trade_action")
+    forced["original_edge_label"] = decision.get("edge_label")
+    forced["no_trade"] = False
+    forced["directional_bias"] = _forecast_bias(prediction)
+    weak_or_flat = (
+        abs(float(prediction.expected_return or 0)) < 0.0025
+        and abs(float(prediction.probability_up or 0.5) - 0.5) < 0.035
+    )
+    forced["neutral_only"] = weak_or_flat
+    forced["tradeable"] = not weak_or_flat
+    forced["trade_action"] = "Best Available / Neutral Bias" if weak_or_flat else "Best Available / Directional Bias"
+    forced["edge_label"] = f"{decision.get('edge_label', 'Low Confidence')} — strategy forced"
+    forced["position_size"] = max(float(decision.get("position_size") or 0), 0.25)
+    forced["reasons"] = [
+        *decision.get("reasons", []),
+        "User preference: always show the best capped-loss strategy for tomorrow; low-confidence gates become warnings, not a No Trade selection.",
+    ]
+    return forced
+
+
+def _forecast_bias(prediction: Prediction) -> str:
+    expected = float(prediction.expected_return or 0)
+    probability_up = float(prediction.probability_up or 0.5)
+    if expected > 0.0025 or probability_up >= 0.535:
+        return "Bullish"
+    if expected < -0.0025 or probability_up <= 0.465:
+        return "Bearish"
+    return "Neutral"
 
 
 def _leg_dict(leg: Leg, expiry) -> dict:
