@@ -44,28 +44,48 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [theme, setTheme] = useState(() => localStorage.getItem('nifty-theme') || 'dark')
 
-  const refresh = async () => {
-    setLoading(true)
-    let refreshNotice = ''
-    try {
-      const sync = await api<any>('/api/auto-refresh', { method: 'POST' })
-      if (sync.status === 'updated') refreshNotice = `Latest data refreshed through ${sync.latest_market_date || sync.target_eod_date}.`
-      else if (sync.status === 'throttled') refreshNotice = sync.message || 'Freshness check was recently attempted; showing latest verified data.'
-      else if (sync.status === 'error') refreshNotice = `Auto-refresh could not complete: ${sync.message}`
-    } catch (e) {
-      refreshNotice = `Auto-refresh could not complete: ${(e as Error).message}`
-    }
+  const loadDashboardSnapshot = async () => {
     const [p, b, m, d, c] = await Promise.allSettled([
       api<Prediction>('/api/latest-prediction'), api<Backtest>('/api/backtest/latest'),
       api<any[]>('/api/models'), api<any>('/api/data-status'), api<RecentCalibrationPoint[]>('/api/calibration/recent?limit=7')
     ])
     if (p.status === 'fulfilled') setPrediction(p.value)
-    else setNotice('No deployed prediction yet. Use Admin to fetch data, train, and deploy an eligible model.')
     if (b.status === 'fulfilled') setBacktest(b.value)
     if (m.status === 'fulfilled') setModels(m.value)
     if (d.status === 'fulfilled') setDataStatus(d.value)
     if (c.status === 'fulfilled') setRecentCalibration(c.value)
-    if (refreshNotice && p.status === 'fulfilled') setNotice(refreshNotice)
+    return p.status === 'fulfilled'
+  }
+
+  const refresh = async () => {
+    setLoading(true)
+    setNotice('')
+    const hasPrediction = await loadDashboardSnapshot()
+    setLoading(false)
+
+    let refreshNotice = hasPrediction
+      ? 'Showing latest saved dashboard while fresh data is checked in the background.'
+      : 'No deployed prediction is saved yet. The server is checking data/model state in the background.'
+    let timeout: number | undefined
+    try {
+      const controller = new AbortController()
+      timeout = window.setTimeout(() => controller.abort(), 30000)
+      const sync = await api<any>('/api/auto-refresh', { method: 'POST', signal: controller.signal })
+      if (sync.status === 'updated') refreshNotice = `Latest data refreshed through ${sync.latest_market_date || sync.target_eod_date}.`
+      else if (sync.status === 'throttled') refreshNotice = sync.message || 'Freshness check was recently attempted; showing latest verified data.'
+      else if (sync.status === 'fresh') refreshNotice = sync.message || 'Dashboard is already current for the latest completed EOD window.'
+      else if (sync.status === 'refreshing') refreshNotice = sync.message || 'Refresh is already running; showing latest saved dashboard state.'
+      else if (sync.status === 'error') refreshNotice = `Auto-refresh could not complete: ${sync.message}`
+      if (sync.status === 'updated' || sync.status === 'fresh') await loadDashboardSnapshot()
+    } catch (e) {
+      refreshNotice = `Auto-refresh could not complete quickly: ${(e as Error).message}. Showing latest saved dashboard state.`
+    } finally {
+      if (timeout !== undefined) window.clearTimeout(timeout)
+    }
+    if (!hasPrediction) {
+      refreshNotice += ' If this is a fresh Render instance, wait for startup refresh to finish or use Admin after the service wakes.'
+    }
+    if (refreshNotice) setNotice(refreshNotice)
     setLoading(false)
   }
   useEffect(() => { refresh() }, [])

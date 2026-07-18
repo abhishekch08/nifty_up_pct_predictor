@@ -3,10 +3,22 @@ export const API_URL = import.meta.env.VITE_API_URL || ''
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  let requestInit = init
+  if (!init?.signal && typeof AbortController !== 'undefined') {
+    const controller = new AbortController()
+    timeout = setTimeout(() => controller.abort(), 15000)
+    requestInit = { ...init, signal: controller.signal }
+  }
   try {
-    response = await fetch(`${API_URL}${path}`, init)
-  } catch {
-    throw new Error('Cannot reach the local API. Keep run.bat open, then refresh this page.')
+    response = await fetch(`${API_URL}${path}`, requestInit)
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') {
+      throw new Error('request timed out while the server was refreshing data')
+    }
+    throw new Error('Cannot reach the API. If this is Render free tier, wait for the service to wake and refresh again.')
+  } finally {
+    if (timeout) clearTimeout(timeout)
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }))

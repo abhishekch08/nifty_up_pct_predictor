@@ -228,8 +228,15 @@ def auto_refresh(db: Session, force: bool = False) -> dict:
     settings = get_settings()
     if not settings.auto_refresh_enabled and not force:
         return {"status": "disabled", "message": "Automatic refresh is disabled on this server."}
-    with AUTO_REFRESH_LOCK:
+    if not AUTO_REFRESH_LOCK.acquire(blocking=force):
+        return {
+            "status": "refreshing",
+            "message": "A market-data refresh is already running; showing the latest saved dashboard state.",
+        }
+    try:
         return _auto_refresh_locked(db, force)
+    finally:
+        AUTO_REFRESH_LOCK.release()
 
 
 def _auto_refresh_locked(db: Session, force: bool = False) -> dict:
