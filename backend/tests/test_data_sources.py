@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import Mock
 import json
 import pandas as pd
@@ -6,7 +6,7 @@ import pandas as pd
 import httpx
 
 from app.data_sources import NSEOfficialSource, YahooChartSource, validate_frame
-from app.services import upsert_market
+from app.services import _known_market_rows, upsert_market
 
 
 def test_yahoo_parser_with_mocked_payload(tmp_path, monkeypatch):
@@ -31,6 +31,19 @@ def test_large_market_upsert_is_chunked_for_sqlite(db):
         "available_at": pd.to_datetime(["2020-01-01T12:00:00Z"] * days),
     })
     assert upsert_market(db, frame) == days
+
+
+def test_known_market_rows_drop_future_availability():
+    frame = pd.DataFrame({
+        "date": [date(2026, 7, 17), date(2026, 7, 20)],
+        "open": [100., 101.], "high": [101., 102.], "low": [99., 100.],
+        "close": [100., 101.], "volume": [1000., 1000.], "prev_close": [99., 100.],
+        "symbol": ["^NSEI", "^NSEI"], "source": ["yahoo_chart", "yahoo_chart"],
+        "available_at": pd.to_datetime(["2026-07-17T12:30:00Z", "2026-07-20T12:30:00Z"]),
+    })
+    now = datetime(2026, 7, 20, 9, 30, tzinfo=timezone.utc)
+    filtered = _known_market_rows(frame, now)
+    assert filtered.date.tolist() == [date(2026, 7, 17)]
 
 
 def test_official_nse_snapshot_and_fii_dii_are_date_matched(monkeypatch):

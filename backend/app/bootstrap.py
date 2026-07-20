@@ -1,15 +1,37 @@
 """First-run and daily local bootstrap: fetch, validate, train, deploy, predict."""
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 import json
 
 from sqlalchemy import select
 
 from .database import Base, SessionLocal, engine
+from .data_sources import SYMBOLS
 from .models import ModelVersion
-from .services import assembled_features, deploy_model, fetch_market_data, generate_prediction, retrain
+from .services import assembled_features, deploy_model, fetch_market_data, generate_prediction, market_frame, retrain
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _expected_eod_date(now: datetime) -> date:
+    if now.weekday() >= 5 or now.time() < time(17, 30):
+        day = now.date() - timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+        return day
+    return now.date()
+
+
+def _fresh_enough(actual: date | None, target: date) -> bool:
+    return bool(actual and actual >= target - timedelta(days=4))
+
+
+def _latest_market_date(db) -> date | None:
+    frame = market_frame(db, SYMBOLS["NIFTY"])
+    if frame.empty:
+        return None
+    value = frame.date.iloc[-1]
+    return value.date() if hasattr(value, "date") else value
 
 
 def main() -> None:
@@ -24,8 +46,18 @@ def main() -> None:
                 print(f"         {warning}", flush=True)
 
         official_date = fetched.get("official_trading_date")
-        if not official_date or official_date < datetime.now(IST).date() - timedelta(days=4):
-            raise RuntimeError("Official NSE EOD data is unavailable or stale; model bootstrap stopped")
+        target_eod_date = _expected_eod_date(datetime.now(IST))
+        latest_market_date = _latest_market_date(db)
+        if not _fresh_enough(official_date, target_eod_date):
+            print(
+                "  WARN   Official NSE index EOD is unavailable/stale; continuing with the latest completed "
+                f"market row {latest_market_date} and degraded data quality.",
+                flush=True,
+            )
+            if not _fresh_enough(latest_market_date, target_eod_date):
+                raise RuntimeError(
+                    "No fresh completed Nifty EOD row is available; model bootstrap stopped before starting dashboard"
+                )
 
         print("[2/3] Validating aligned features...", flush=True)
         features = assembled_features(db)
@@ -53,7 +85,8 @@ def main() -> None:
 
         prediction = result["prediction"]
         print("READY " + json.dumps({
-            "official_trading_date": str(official_date), "model_version": prediction["model_version"],
+            "official_trading_date": str(official_date), "market_trading_date": str(latest_market_date),
+            "model_version": prediction["model_version"],
             "prediction_date": prediction["date"], "next_trading_day": prediction["next_trading_day"],
             "probability_up": prediction["probability_up"], "data_quality": prediction["data_quality"],
             "data_completeness": prediction["data_completeness"],

@@ -127,13 +127,20 @@ def _expected_eod_date(now: datetime | None = None) -> date:
 
 def fetch_market_data(db: Session, years: int = 12, cache_hours: int = 6) -> dict:
     source = YahooChartSource(cache_hours=cache_hours)
-    end, start = _today_ist(), _today_ist() - timedelta(days=365 * years)
+    now = _now_ist()
+    end, start = now.date(), now.date() - timedelta(days=365 * years)
     statuses = []
     fetched = 0
     for label, ticker in SYMBOLS.items():
         try:
             frame = source.history(ticker, start, end)
+            before_filter = len(frame)
+            frame = _known_market_rows(frame, now)
             quality = validate_frame(frame, {"date", "open", "high", "low", "close"}, label)
+            if len(frame) < before_filter:
+                quality["warnings"].append(
+                    f"ignored {before_filter - len(frame)} not-yet-final daily row(s) based on availability timestamp"
+                )
             fetched += upsert_market(db, frame)
             statuses.append({**quality, "symbol": label, "source": "yahoo_chart"})
         except Exception as exc:  # source failures must be visible and non-fatal
@@ -181,13 +188,28 @@ def fetch_market_data(db: Session, years: int = 12, cache_hours: int = 6) -> dic
             "status": "complete" if critical_ok else "partial"}
 
 
+def _known_market_rows(frame: pd.DataFrame, now: datetime) -> pd.DataFrame:
+    """Drop daily bars whose conservative first-known time is still in the future.
+
+    Yahoo can expose an in-progress daily candle while the exchange session is
+    open. That is useful for live charts, but not for this EOD prediction model:
+    using it would convert yesterday's target into today's unfinished return.
+    """
+    if frame.empty or "available_at" not in frame:
+        return frame
+    available = pd.to_datetime(frame["available_at"], utc=True, errors="coerce")
+    cutoff = now.astimezone(timezone.utc)
+    return frame.loc[available <= cutoff].copy()
+
+
 def market_frame(db: Session, ticker: str) -> pd.DataFrame:
     records = db.scalars(select(MarketDaily).where(MarketDaily.symbol == ticker).order_by(MarketDaily.date)).all()
-    return pd.DataFrame([{
+    frame = pd.DataFrame([{
         "date": r.date, "open": r.open, "high": r.high, "low": r.low, "close": r.close,
         "prev_close": r.prev_close, "volume": r.volume, "symbol": r.symbol,
         "source": r.source, "available_at": r.available_at,
     } for r in records])
+    return _known_market_rows(frame, _now_ist())
 
 
 def flow_frame(db: Session) -> pd.DataFrame:
@@ -298,7 +320,11 @@ def _auto_refresh_locked(db: Session, force: bool = False) -> dict:
 
 
 def _latest_market_date(db: Session) -> date | None:
-    return db.scalar(select(MarketDaily.date).where(MarketDaily.symbol == SYMBOLS["NIFTY"]).order_by(MarketDaily.date.desc()))
+    frame = market_frame(db, SYMBOLS["NIFTY"])
+    if frame.empty:
+        return None
+    value = frame.date.iloc[-1]
+    return value.date() if hasattr(value, "date") else value
 
 
 def _latest_prediction_row(db: Session) -> Prediction | None:
